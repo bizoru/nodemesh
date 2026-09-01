@@ -1,0 +1,17 @@
+{
+  "node": "gateway",
+  "port": 7777,
+  "peers": ["node-b", "node-c"],
+  "dataDir": "/var/lib/nodemesh",
+  "collectSecs": 60,
+  "gossipSecs": 120,
+  "locations": {
+    "gateway": "Cloud",
+    "node-b": "Office",
+    "node-c": "Office"
+  },
+  "networks": {
+    "aa:bb:cc:dd:ee:ff": "Home WiFi"
+  },
+  "lanPeer": "node-c.local"
+}

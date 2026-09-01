@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>nodemesh</title>
+<style>
+  :root {
+    --bg:#f6f7f9; --card:#ffffff; --text:#1a1d21; --muted:#6b7280;
+    --line:#e5e7eb; --ok:#16a34a; --stale:#d97706; --off:#9ca3af; --accent:#2563eb;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1a1f26; --text:#e5e7eb; --muted:#9ca3af;
+            --line:#2a313a; --ok:#22c55e; --stale:#f59e0b; --off:#6b7280; --accent:#60a5fa; }
+  }
+  * { box-sizing:border-box; margin:0; }
+  body { background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,sans-serif; padding:24px; }
+  h1 { font-size:20px; margin-bottom:4px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:20px; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(280px,1fr)); gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; cursor:pointer; }
+  .card:hover { border-color:var(--accent); }
+  .card h2 { font-size:16px; display:flex; align-items:center; gap:8px; }
+  .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
+  .online .dot { background:var(--ok); } .stale .dot { background:var(--stale); } .offline .dot { background:var(--off); }
+  .site { color:var(--muted); font-size:12px; margin-left:auto; }
+  dl { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin-top:10px; font-size:13px; }
+  dt { color:var(--muted); } dd { font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
+  #history { margin-top:26px; display:none; }
+  #history h2 { font-size:16px; margin-bottom:8px; }
+  .tablewrap { overflow-x:auto; border:1px solid var(--line); border-radius:10px; }
+  table { border-collapse:collapse; width:100%; background:var(--card); font-size:13px; }
+  th,td { text-align:left; padding:7px 12px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--muted); font-weight:500; }
+  tr:last-child td { border-bottom:none; }
+  .badge { font-size:11px; padding:1px 8px; border-radius:99px; border:1px solid var(--line); color:var(--muted); }
+  .badge.valid { color:var(--ok); border-color:var(--ok); }
+  .sites { display:flex; gap:10px; flex-wrap:wrap; margin-bottom:18px; }
+  .site-badge { display:flex; align-items:center; gap:7px; background:var(--card); border:1px solid var(--line);
+                border-radius:8px; padding:8px 12px; font-size:13px; }
+  .site-badge .dot { width:8px; height:8px; }
+  .ts-row dd { display:flex; align-items:center; gap:6px; }
+  .ts-row .dot { width:7px; height:7px; }
+  .lan-note { font-size:12px; color:var(--muted); margin-top:8px; }
+</style>
+</head>
+<body>
+<h1>nodemesh</h1>
+<div class="sub" id="self">…</div>
+<div class="sites" id="sites"></div>
+<div class="grid" id="grid"></div>
+<div id="history"></div>
+<script>
+const SITES = {};  // site labels come from the API (config "locations"); kept as a fallback hook
+const fmtUp = s => { if (!s) return "—";
+                     const d=Math.floor(s/86400), h=Math.floor(s%86400/3600), m=Math.floor(s%3600/60);
+                     return (d?d+"d ":"")+(h?h+"h ":"")+m+"m"; };
+const fmtTs = t => t ? new Date(t*1000).toLocaleString() : "sin reportes";
+let current = null;
+
+function lanNote(n) {
+  if (!n.lanCheck || n.tsActive) return ""; // solo aporta algo cuando Tailscale está caído
+  const ageMin = Math.round((Date.now()/1000 - n.lanCheck.checkedAt) / 60);
+  return n.lanCheck.reachable
+    ? `<div class="lan-note">📶 confirmado vivo por LAN (hace ${ageMin < 1 ? "&lt;1" : ageMin} min), aunque Tailscale esté caído</div>`
+    : `<div class="lan-note">⚠️ tampoco responde por LAN — posible caída real</div>`;
+}
+
+function bleNote(n) {
+  if (!n.bleCheck) return "";
+  const ageMin = Math.round((Date.now()/1000 - n.bleCheck.lastSeen) / 60);
+  // Se muestra siempre que haya dato (no solo con Tailscale caído): a
+  // diferencia del LAN check, esto también confirma "tiene internet" o no,
+  // no solo "está prendido".
+  const estado = n.bleCheck.peerStatus === "ok" ? "con internet" : "SIN internet";
+  return `<div class="lan-note">📡 bluetooth: ${estado} (rssi ${n.bleCheck.rssi}dBm, hace ${ageMin < 1 ? "&lt;1" : ageMin} min)</div>`;
+}
+
+async function refresh() {
+  const nodes = await fetch("/api/nodes").then(r=>r.json());
+  const grid = document.getElementById("grid");
+  grid.innerHTML = "";
+
+  // Resumen por locación: ¿algún nodo con Tailscale activo ahí?
+  const sites = {};
+  Object.keys(nodes).forEach(name => {
+    const site = nodes[name].location || SITES[name] || "?";
+    sites[site] = sites[site] || false;
+    if (nodes[name].tsActive) sites[site] = true;
+  });
+  document.getElementById("sites").innerHTML = Object.keys(sites).sort().map(site => `
+    <div class="site-badge"><span class="dot" style="background:${sites[site] ? "var(--ok)" : "var(--off)"}"></span>
+      ${site} — ${sites[site] ? "Tailscale activo" : "sin Tailscale"}</div>`).join("");
+
+  Object.keys(nodes).sort().forEach(name => {
+    const n = nodes[name];
+    const el = document.createElement("div");
+    el.className = "card " + n.state;
+    el.innerHTML = `<h2><span class="dot"></span>${name}<span class="site">${n.location || SITES[name] || ""}</span></h2>
+      <dl>
+        <dt>network</dt><dd>${n.netType ? n.netType + (n.ssid?" · "+n.ssid:"") : "—"}</dd>
+        <dt>local IP</dt><dd>${n.localIP||"—"}</dd>
+        <dt class="ts-row">tailscale</dt><dd class="ts-row"><span class="dot" style="background:${n.tsActive ? "var(--ok)" : "var(--off)"}"></span>${n.tsActive ? (n.tsIP||"activo") : "inactivo"}</dd>
+        <dt>uptime</dt><dd>${fmtUp(n.uptimeSec)}</dd>
+        <dt>last seen</dt><dd>${fmtTs(n.ts)}</dd>
+      </dl>
+      ${lanNote(n)}
+      ${bleNote(n)}`;
+    el.onclick = () => showHistory(name);
+    grid.appendChild(el);
+  });
+  if (current) showHistory(current, true);
+}
+
+async function showHistory(name, quiet) {
+  current = name;
+  const [hist, ver] = await Promise.all([
+    fetch(`/api/history/${name}?limit=50`).then(r=>r.json()),
+    fetch(`/api/verify/${name}`).then(r=>r.json()),
+  ]);
+  const div = document.getElementById("history");
+  div.style.display = "block";
+  div.innerHTML = `<h2>${name} — history
+      <span class="badge ${ver.valid?"valid":""}">chain ${ver.valid?"verified":"BROKEN"} · ${ver.length} records</span></h2>
+    <div class="tablewrap"><table>
+      <tr><th>#</th><th>time</th><th>network</th><th>local IP</th><th>tailscale IP</th><th>uptime</th></tr>
+      ${(hist||[]).map(r=>`<tr><td>${r.seq}</td><td>${fmtTs(r.ts)}</td>
+        <td>${r.netType}${r.ssid?" · "+r.ssid:""}</td>
+        <td>${r.localIP||"—"}</td><td>${r.tsIP||"—"}</td><td>${fmtUp(r.uptimeSec)}</td></tr>`).join("")}
+    </table></div>`;
+  if (!quiet) div.scrollIntoView({behavior:"smooth"});
+}
+
+fetch("/api/nodes").then(r=>r.json()).then(() => {
+  document.getElementById("self").textContent =
+    "distributed node status — every node replicates every chain · " + location.host;
+});
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>

@@ -1,0 +1,13 @@
+[Unit]
+Description=nodemesh distributed node-status service
+After=network-online.target tailscaled.service
+
+[Service]
+User=nodemesh
+WorkingDirectory=/var/lib/nodemesh
+ExecStart=/usr/local/bin/nodemesh -config /var/lib/nodemesh/nodemesh.json
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

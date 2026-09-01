@@ -1,0 +1,5 @@
+dist/
+data/
+nodemesh
+nodemesh.json
+*.exe
