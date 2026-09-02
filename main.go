@@ -117,6 +117,11 @@ type Record struct {
 	Hash      string `json:"hash"`
 }
 
+// version se inyecta en compilación con -ldflags "-X main.version=...".
+// Fuera de la cadena hash a propósito: es metadato del binario, no del estado
+// de red, y meterlo en Record obligaría a re-hashear todo el historial.
+var version = "dev"
+
 // hashOf computes the record hash over a canonical field ordering (excluding Hash).
 func hashOf(r Record) string {
 	payload := fmt.Sprintf("%s|%d|%d|%s|%s|%s|%s|%d|%s",
@@ -661,8 +666,46 @@ type nodeInfo struct {
 	State    string    `json:"state"` // online | stale | offline
 	TSActive bool      `json:"tsActive"`
 	Location string    `json:"location,omitempty"`
+	Version  string    `json:"version,omitempty"`  // del propio binario; el de los pares llega por gossip
 	LANCheck *LANCheck `json:"lanCheck,omitempty"` // only set by whichever node actually checked
 	BLECheck *BLECheck `json:"bleCheck,omitempty"` // only set by whichever node actually checked
+}
+
+// Versiones de los pares, aprendidas en cada ronda de gossip al leer su
+// /api/nodes. No se persisten: son del binario que corre AHORA, así que
+// reconstruirlas en cada arranque es lo correcto.
+var peerVersions = struct {
+	mu sync.RWMutex
+	m  map[string]string
+}{m: map[string]string{}}
+
+func setPeerVersion(node, v string) {
+	if v == "" {
+		return
+	}
+	peerVersions.mu.Lock()
+	peerVersions.m[node] = v
+	peerVersions.mu.Unlock()
+}
+
+func getPeerVersion(node string) string {
+	peerVersions.mu.RLock()
+	defer peerVersions.mu.RUnlock()
+	return peerVersions.m[node]
+}
+
+// peerNodeName averigua cuál de los nodos que devuelve un peer es el peer
+// mismo, comparando su IP de Tailscale con la que acabamos de consultar. Sirve
+// para quedarnos SOLO con la versión que ese nodo conoce de primera mano: la
+// que reporta de terceros es copia de su propia caché y propagarla acabaría
+// sirviendo versiones viejas indefinidamente.
+func peerNodeName(infos map[string]nodeInfo, peerIP string) string {
+	for n, info := range infos {
+		if info.TSIP != "" && info.TSIP == peerIP {
+			return n
+		}
+	}
+	return ""
 }
 
 func gossipOnce(cfg *Config, store *Store, client *http.Client) {
@@ -680,8 +723,13 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 		if err := getJSON(client, base+"/api/nodes", &infos); err != nil {
 			continue // peer offline; normal
 		}
-		for n := range infos {
+		for n, info := range infos {
 			known[n] = true
+			// Cada nodo solo conoce con certeza SU propia versión; la que
+			// reporta de terceros es de segunda mano, así que se ignora.
+			if n == peerNodeName(infos, strings.Split(peer, ":")[0]) {
+				setPeerVersion(n, info.Version)
+			}
 		}
 		// pull chain extensions for every known node
 		for n := range known {
@@ -753,6 +801,11 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 				state = "stale"
 			}
 			info := nodeInfo{Record: head, State: state, TSActive: head.TSIP != "", Location: nodeLocation[n]}
+			if n == cfg.Node {
+				info.Version = version
+			} else {
+				info.Version = getPeerVersion(n)
+			}
 			if n == lanPeerNode(cfg) {
 				lanState.mu.RLock()
 				if lanState.checkedAt > 0 {

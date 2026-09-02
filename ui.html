@@ -103,6 +103,7 @@ async function refresh() {
         <dt class="ts-row">tailscale</dt><dd class="ts-row"><span class="dot" style="background:${n.tsActive ? "var(--ok)" : "var(--off)"}"></span>${n.tsActive ? (n.tsIP||"activo") : "inactivo"}</dd>
         <dt>uptime</dt><dd>${fmtUp(n.uptimeSec)}</dd>
         <dt>last seen</dt><dd>${fmtTs(n.ts)}</dd>
+        <dt>versión</dt><dd>${n.version || "—"}</dd>
       </dl>
       ${lanNote(n)}
       ${bleNote(n)}`;
