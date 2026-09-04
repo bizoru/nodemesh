@@ -130,6 +130,35 @@ restart the service"; `deploy/nodemesh.service` is a systemd unit, and macOS
 runs it fine as a root LaunchDaemon. Data is append-only JSONL per node —
 safe to read, never edit by hand (it breaks the chain).
 
+### Windows
+
+`deploy/nodemesh-task-windows.xml` registers it as a boot-triggered scheduled
+task running as SYSTEM:
+
+```
+schtasks /create /tn nodemesh /xml C:\ProgramData\nodemesh\task.xml /f
+```
+
+Five of its settings are not cosmetic — Windows' defaults will silently kill a
+long-running task, and on a laptop they do it in ways that look like the
+program crashed:
+
+| Setting | Default | Why it must change |
+|---|---|---|
+| `ExecutionTimeLimit` | `PT72H` | Windows kills the process at 72 h and reports `267014` — "terminated by user" |
+| `RestartOnFailure/Count` | none | nothing revives it |
+| `DisallowStartIfOnBatteries` | `true` | on battery the task sits in `Queued`; `schtasks /Run` still reports success |
+| `StopIfGoingOnBatteries` | `true` | unplugging kills it |
+| `MultipleInstancesPolicy` | `IgnoreNew` | two writers on one node silently reset the chain |
+
+The XML must be **UTF-16LE with a BOM** or `schtasks` answers `The task XML is
+malformed` without saying why. `iconv -t UTF-16LE` omits the BOM and
+`iconv -t UTF-16` writes a big-endian one; neither works:
+
+```sh
+printf '\xff\xfe' > task.xml && iconv -f UTF-8 -t UTF-16LE source.xml >> task.xml
+```
+
 ## Notes from production
 
 Things that cost real debugging time, kept here because they generalize:
