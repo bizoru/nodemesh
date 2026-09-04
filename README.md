@@ -84,12 +84,56 @@ Any node answers for all nodes.
 | `GET /api/history/{node}?limit=N` | Newest-first history |
 | `GET /api/log/{node}?after=SEQ` | Chain segment (what gossip consumes) |
 | `GET /api/verify/{node}` | Walk the chain, report valid + length |
+| `GET /api/specs` | This node's hardware: model, CPU, cores, RAM, disk, load |
+| `GET /api/capacity` | **Fleet totals** — cores, RAM and disk summed across every non-offline node |
 | `GET /api/host` | This node only: battery (`present`/`percent`/`charging`) |
 | `GET /api/ports` | This node's listening ports |
+| `GET /metrics` | Prometheus: this node's specs (+ BLE beacon where configured) |
 | `POST /api/restart` | Localhost only — exit so the supervisor restarts |
 
 `charging` means *on external power*, not "the percentage is rising": a laptop
 plugged in at 100% is `charging: true`.
+
+## Specs and capacity
+
+Every node reports what it is made of — model, CPU, physical and logical cores,
+total and used RAM, disk size and free space, and 1-minute load — and those
+specs ride along in the gossip, so any node can answer *how much machine does
+this fleet actually have* without anyone SSHing anywhere:
+
+```
+$ curl -s node:7777/api/capacity | jq '{nodes, coresLog, memTotalGB}'
+{ "nodes": 9, "coresLog": 78, "memTotalGB": 106 }
+```
+
+Three decisions worth knowing about:
+
+**Specs are not in the hash chain.** The chain records *network state
+transitions* and only grows when `sameStatus()` says something changed. Used
+RAM changes every minute, so putting it in `Record` would turn a transition log
+into an unbounded time series. Specs travel as a live field on `/api/nodes`,
+carrying a `collectedAt` so a stale copy is visible as stale — the same call
+`version` makes, for the same reason.
+
+**Unlike `version`, specs relay second-hand.** A peer telling us about a third
+node it can reach but we cannot is accepted, because `collectedAt` lets the
+receiver keep whichever copy is newer. That timestamp is exactly what `version`
+lacks, which is why versions are first-hand only.
+
+**Disk is measured at `DataDir`, not at `/`.** On Android the root filesystem
+is the read-only system partition — permanently 100% full at 1.2 GB on the R1 —
+while the real storage (104 GB) is mounted elsewhere. Measuring where the
+process actually writes is both correct there and the more useful number
+everywhere else: it is the disk that can fill up.
+
+The Linux collector uses only `/proc`, `/sys` and syscalls — **never `exec`**.
+On Android `exec.LookPath` reaches `faccessat2()`, which the system seccomp
+policy blocks, killing the process with an uncatchable `SIGSYS` (see `termuxBin`
+in `host.go`). Specs are collected every 30s on every node, so that path has to
+be structurally incapable of triggering it.
+
+Load average is unix-only; Windows reports `0` rather than substituting a
+CPU-percentage that would not mean the same thing.
 
 ## Configure
 

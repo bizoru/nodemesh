@@ -42,11 +42,22 @@
   .ts-row dd { display:flex; align-items:center; gap:6px; }
   .ts-row .dot { width:7px; height:7px; }
   .lan-note { font-size:12px; color:var(--muted); margin-top:8px; }
+  .specs { margin-top:10px; padding-top:9px; border-top:1px solid var(--line); font-size:12px; color:var(--muted); }
+  .specs .cpu { color:var(--text); font-size:13px; }
+  .bar { height:4px; border-radius:99px; background:var(--line); margin:5px 0 3px; overflow:hidden; }
+  .bar > i { display:block; height:100%; background:var(--accent); }
+  .bar > i.hot { background:var(--stale); }
+  .cap { background:var(--card); border:1px solid var(--line); border-radius:10px;
+         padding:14px 16px; margin-bottom:18px; display:flex; gap:26px; flex-wrap:wrap; align-items:baseline; }
+  .cap .n { font-size:19px; font-variant-numeric:tabular-nums; }
+  .cap .l { font-size:12px; color:var(--muted); display:block; }
+  .cap .warn { color:var(--stale); font-size:12px; }
 </style>
 </head>
 <body>
 <h1>nodemesh</h1>
 <div class="sub" id="self">…</div>
+<div class="cap" id="cap" hidden></div>
 <div class="sites" id="sites"></div>
 <div class="grid" id="grid"></div>
 <div id="history"></div>
@@ -74,6 +85,41 @@ function bleNote(n) {
   // no solo "está prendido".
   const estado = n.bleCheck.peerStatus === "ok" ? "con internet" : "SIN internet";
   return `<div class="lan-note">📡 bluetooth: ${estado} (rssi ${n.bleCheck.rssi}dBm, hace ${ageMin < 1 ? "&lt;1" : ageMin} min)</div>`;
+}
+
+const fmtGB = v => v == null ? "—" : (v >= 1024 ? (v/1024).toFixed(1)+" TB" : Math.round(v)+" GB");
+
+// specsBlock: lo que hasta ahora había que ir a sacar con ssh nodo por nodo.
+// La barra es de RAM, no de disco: es el recurso que de verdad limita qué se
+// puede programar en cada máquina de esta flota.
+function specsBlock(n) {
+  const s = n.specs;
+  if (!s) return '<div class="specs">specs: sin reportar todavía</div>';
+  const memT = s.memTotalMB/1024, memU = s.memUsedMB/1024;
+  const pct = memT ? Math.min(100, Math.round(memU/memT*100)) : 0;
+  const cores = s.coresPhys === s.coresLog ? `${s.coresPhys} núcleos`
+              : `${s.coresPhys} núcleos / ${s.coresLog} hilos`;
+  const age = s.collectedAt ? Math.round((Date.now()/1000 - s.collectedAt)/60) : null;
+  return `<div class="specs">
+    <div class="cpu">${s.cpu || "CPU desconocida"}</div>
+    ${cores}${s.model ? " · " + s.model : ""}${s.arch ? " · " + s.arch : ""}
+    <div class="bar"><i class="${pct >= 85 ? "hot" : ""}" style="width:${pct}%"></i></div>
+    RAM ${memU.toFixed(1)}/${memT.toFixed(1)} GB (${pct}%) · disco ${fmtGB(s.diskFreeGB)} libres de ${fmtGB(s.diskTotalGB)}
+    ${s.load1 ? " · carga " + s.load1.toFixed(2) : ""}
+    ${age !== null && age > 10 ? `<br><span style="color:var(--stale)">specs de hace ${age} min</span>` : ""}
+  </div>`;
+}
+
+async function renderCapacity() {
+  const c = await fetch("/api/capacity").then(r=>r.json());
+  const el = document.getElementById("cap");
+  el.hidden = false;
+  el.innerHTML = `
+    <div><span class="n">${c.nodes}</span><span class="l">nodos activos</span></div>
+    <div><span class="n">${c.coresLog}</span><span class="l">hilos (${c.coresPhys} núcleos)</span></div>
+    <div><span class="n">${c.memTotalGB.toFixed(0)} GB</span><span class="l">RAM total · ${c.memUsedGB.toFixed(0)} GB en uso</span></div>
+    <div><span class="n">${fmtGB(c.diskTotalGB)}</span><span class="l">disco · ${fmtGB(c.diskFreeGB)} libres</span></div>
+    ${c.missing?.length ? `<div class="warn">sin specs: ${c.missing.join(", ")}</div>` : ""}`;
 }
 
 async function refresh() {
@@ -106,11 +152,13 @@ async function refresh() {
         <dt>versión</dt><dd>${n.version || "—"}</dd>
       </dl>
       ${lanNote(n)}
-      ${bleNote(n)}`;
+      ${bleNote(n)}
+      ${specsBlock(n)}`;
     el.onclick = () => showHistory(name);
     grid.appendChild(el);
   });
   if (current) showHistory(current, true);
+  renderCapacity();
 }
 
 async function showHistory(name, quiet) {

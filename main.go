@@ -669,6 +669,7 @@ type nodeInfo struct {
 	Version  string    `json:"version,omitempty"`  // del propio binario; el de los pares llega por gossip
 	LANCheck *LANCheck `json:"lanCheck,omitempty"` // only set by whichever node actually checked
 	BLECheck *BLECheck `json:"bleCheck,omitempty"` // only set by whichever node actually checked
+	Specs    *Specs    `json:"specs,omitempty"`    // propios o aprendidos por gossip (ver specs.go)
 }
 
 // Versiones de los pares, aprendidas en cada ronda de gossip al leer su
@@ -730,6 +731,12 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			if n == peerNodeName(infos, strings.Split(peer, ":")[0]) {
 				setPeerVersion(n, info.Version)
 			}
+			// Los specs sí se aceptan de segunda mano: llevan CollectedAt, así
+			// que setPeerSpecs se queda con la copia más nueva. Es lo que hace
+			// que un nodo conozca la flota entera aunque no llegue a todos.
+			if n != cfg.Node {
+				setPeerSpecs(n, info.Specs)
+			}
 		}
 		// pull chain extensions for every known node
 		for n := range known {
@@ -766,6 +773,69 @@ func getJSON(client *http.Client, url string, v any) error {
 
 // ---------- http ----------
 
+// nodeInfos arma la vista viva de toda la flota. Sale del handler para que
+// /api/capacity pueda sumar exactamente lo mismo que se muestra en /api/nodes,
+// sin volver a decidir por su cuenta qué nodo está online.
+func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
+	out := map[string]nodeInfo{}
+	now := time.Now().Unix()
+	// Un nodo sin cadena (o con cadena vacía) NO se esconde: se reporta
+	// offline. Antes esto hacía `continue` y el nodo simplemente
+	// desaparecía de la página — justo lo contrario de lo que uno quiere
+	// ver cuando algo se cayó o nunca llegó a reportar.
+	emitOffline := func(n string) {
+		out[n] = nodeInfo{Record: Record{Node: n}, State: "offline", Location: nodeLocation[n]}
+	}
+	for _, n := range store.Nodes() {
+		head, ok := store.Head(n)
+		if !ok {
+			emitOffline(n)
+			continue
+		}
+		// heartbeats land every 10 min; gossip adds up to ~4 min of lag
+		state := "online"
+		age := now - head.TS
+		if age > 45*60 {
+			state = "offline"
+		} else if age > 16*60 {
+			state = "stale"
+		}
+		info := nodeInfo{Record: head, State: state, TSActive: head.TSIP != "", Location: nodeLocation[n]}
+		if n == cfg.Node {
+			info.Version = version
+			s := localSpecs()
+			info.Specs = &s
+		} else {
+			info.Version = getPeerVersion(n)
+			info.Specs = getPeerSpecs(n)
+		}
+		if n == lanPeerNode(cfg) {
+			lanState.mu.RLock()
+			if lanState.checkedAt > 0 {
+				info.LANCheck = &LANCheck{Reachable: lanState.reachable, CheckedAt: lanState.checkedAt}
+			}
+			lanState.mu.RUnlock()
+
+			bleState.mu.RLock()
+			if bleState.check != nil {
+				c := *bleState.check
+				info.BLECheck = &c
+			}
+			bleState.mu.RUnlock()
+		}
+		out[n] = info
+	}
+	// Nodos que la topología fija conoce pero de los que este nodo no
+	// tiene cadena todavía (recién agregados al tailnet, o nunca vistos):
+	// también salen, offline, en vez de faltar en la página.
+	for n := range nodeLocation {
+		if _, ok := out[n]; !ok {
+			emitOffline(n)
+		}
+	}
+	return out
+}
+
 func newMux(cfg *Config, store *Store) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
@@ -777,60 +847,11 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 		w.Write(uiHTML)
 	})
 	mux.HandleFunc("/api/nodes", func(w http.ResponseWriter, r *http.Request) {
-		out := map[string]nodeInfo{}
-		now := time.Now().Unix()
-		// Un nodo sin cadena (o con cadena vacía) NO se esconde: se reporta
-		// offline. Antes esto hacía `continue` y el nodo simplemente
-		// desaparecía de la página — justo lo contrario de lo que uno quiere
-		// ver cuando algo se cayó o nunca llegó a reportar.
-		emitOffline := func(n string) {
-			out[n] = nodeInfo{Record: Record{Node: n}, State: "offline", Location: nodeLocation[n]}
-		}
-		for _, n := range store.Nodes() {
-			head, ok := store.Head(n)
-			if !ok {
-				emitOffline(n)
-				continue
-			}
-			// heartbeats land every 10 min; gossip adds up to ~4 min of lag
-			state := "online"
-			age := now - head.TS
-			if age > 45*60 {
-				state = "offline"
-			} else if age > 16*60 {
-				state = "stale"
-			}
-			info := nodeInfo{Record: head, State: state, TSActive: head.TSIP != "", Location: nodeLocation[n]}
-			if n == cfg.Node {
-				info.Version = version
-			} else {
-				info.Version = getPeerVersion(n)
-			}
-			if n == lanPeerNode(cfg) {
-				lanState.mu.RLock()
-				if lanState.checkedAt > 0 {
-					info.LANCheck = &LANCheck{Reachable: lanState.reachable, CheckedAt: lanState.checkedAt}
-				}
-				lanState.mu.RUnlock()
-
-				bleState.mu.RLock()
-				if bleState.check != nil {
-					c := *bleState.check
-					info.BLECheck = &c
-				}
-				bleState.mu.RUnlock()
-			}
-			out[n] = info
-		}
-		// Nodos que la topología fija conoce pero de los que este nodo no
-		// tiene cadena todavía (recién agregados al tailnet, o nunca vistos):
-		// también salen, offline, en vez de faltar en la página.
-		for n := range nodeLocation {
-			if _, ok := out[n]; !ok {
-				emitOffline(n)
-			}
-		}
-		writeJSON(w, out)
+		writeJSON(w, nodeInfos(cfg, store))
+	})
+	mux.HandleFunc("/api/specs", specsHandler)
+	mux.HandleFunc("/api/capacity", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, capacityOf(nodeInfos(cfg, store)))
 	})
 	mux.HandleFunc("/api/log/", func(w http.ResponseWriter, r *http.Request) {
 		node := strings.TrimPrefix(r.URL.Path, "/api/log/")
@@ -867,6 +888,25 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 	// /api/nodes. Only ever non-empty on nodes with BLEStatePath set.
 	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; version=0.0.4")
+		// Specs del nodo local. Solo los propios: si cada nodo re-exportara
+		// los de la flota entera, Prometheus vería la misma serie cinco veces
+		// con valores que se pisan según quién scrapee antes.
+		s := localSpecs()
+		lbl := fmt.Sprintf("{node=%q,model=%q,cpu=%q}", cfg.Node, s.Model, s.CPU)
+		for _, m := range []struct {
+			name, help string
+			val        float64
+		}{
+			{"nodemesh_node_cores_physical", "physical CPU cores on this node", float64(s.CoresPhys)},
+			{"nodemesh_node_cores_logical", "logical CPU cores (threads) on this node", float64(s.CoresLog)},
+			{"nodemesh_node_memory_total_bytes", "total physical RAM on this node", float64(s.MemTotalMB) * (1 << 20)},
+			{"nodemesh_node_memory_used_bytes", "RAM in use on this node", float64(s.MemUsedMB) * (1 << 20)},
+			{"nodemesh_node_disk_total_bytes", "size of the root filesystem", s.DiskTotalGB * (1 << 30)},
+			{"nodemesh_node_disk_free_bytes", "free space on the root filesystem", s.DiskFreeGB * (1 << 30)},
+			{"nodemesh_node_load1", "1-minute load average (0 on Windows: no equivalent)", s.Load1},
+		} {
+			fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s%s %g\n", m.name, m.help, m.name, m.name, lbl, m.val)
+		}
 		bleState.mu.RLock()
 		c := bleState.check
 		bleState.mu.RUnlock()
@@ -942,6 +982,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
+	specsDiskPath = cfg.DataDir // el disco que se reporta es donde escribimos
 	log.Printf("nodemesh starting: node=%s port=%d peers=%v", cfg.Node, cfg.Port, cfg.Peers)
 
 	// collector loop
