@@ -117,9 +117,10 @@ func getPeerSpecs(node string) *Specs {
 }
 
 // Capacity es la suma de la flota: lo que antes había que ir a sacar a mano
-// nodo por nodo con ssh. Solo cuenta los nodos que NO están offline —un equipo
-// apagado no aporta capacidad— y expone en Missing los que sí cuentan pero de
-// los que todavía no llegaron specs, para que el total nunca mienta por omisión.
+// nodo por nodo con ssh. Solo cuenta los nodos alcanzables —un equipo apagado,
+// o encendido pero incomunicado, no aporta capacidad utilizable— y expone en
+// Missing los que sí cuentan pero de los que todavía no llegaron specs, para
+// que el total nunca mienta por omisión.
 type Capacity struct {
 	Nodes       int              `json:"nodes"`
 	CoresPhys   int              `json:"coresPhys"`
@@ -135,7 +136,11 @@ type Capacity struct {
 func capacityOf(infos map[string]nodeInfo) Capacity {
 	c := Capacity{Per: map[string]Specs{}}
 	for name, info := range infos {
-		if info.State == "offline" {
+		// "isolated" también se excluye: la máquina está encendida, pero si
+		// no la alcanza ninguna red no se le puede mandar trabajo, y capacidad
+		// aquí significa capacidad utilizable. Además sus specs son de la
+		// última vez que se pudo hablar con ella.
+		if info.State == stateOffline || info.State == stateIsolated {
 			continue
 		}
 		if info.Specs == nil {

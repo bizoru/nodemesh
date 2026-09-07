@@ -43,7 +43,8 @@ tamper-evident and a peer can verify a chain it did not produce.
 `GET /api/verify/{node}` walks the chain and reports validity and length.
 
 Freshness is derived, not stored: `online` under 16 min, `stale` under 45 min,
-`offline` beyond that.
+`offline` beyond that — and then corrected by the cross-check below, which can
+both bring a verdict forward and hold one back.
 
 ## Gossip
 
@@ -69,9 +70,61 @@ nodemesh checks independent paths and reports them separately:
   and the LAN being down.
 
 So the dashboard can say *"off the overlay, but answering on the LAN"*
-instead of a misleading *"offline"*. These signals are computed at serve time
-and deliberately **not** chained — they are observations by the observing
-node, not facts about the subject.
+instead of a misleading *"offline"*. These signals are deliberately **not**
+chained — they are observations by the observing node, not facts about the
+subject — but they do decide the state:
+
+| overlay | LAN | BLE | state |
+|---|---|---|---|
+| answers | — | — | `online` — it just talked to us |
+| silent | reachable | — | `stale`, never `offline` — alive, just off the overlay |
+| silent past grace | unreachable past grace | silent | `offline` — two paths agree |
+| silent past grace | unreachable past grace | alive | `isolated` — powered on, nothing reaches it |
+| silent | no LAN sibling | — | falls back to the time-only verdict |
+
+**Why not go by the age of the chain.** That was the obvious rule and it is
+wrong in both directions. The chain only grows on state changes and on the
+10-minute heartbeat, so a perfectly healthy node routinely sits ten minutes
+without writing: "hasn't reported in a while" does not distinguish a dead node
+from a quiet one, and using it as the trigger marked *live* nodes down. In the
+other direction it is far too slow — on 2026-09-07 a power cut took
+`steven-mini` down for six minutes (its chain jumps from 13 days of uptime
+straight to 31 seconds) and nodemesh reported `online` the whole time, because
+the gap fit between two heartbeats.
+
+What is fast and honest is whether anyone can still *talk* to the node. A
+successful `/api/nodes` fetch is immediate proof of life; a failed one used to
+be a silent `continue` in the gossip loop and is now half the evidence of a
+death. The ping to the LAN sibling is the other half. Both run every cycle, and
+both must have been failing for `graceSecs` before a node is called down — a
+single lost packet proves nothing.
+
+Three guards keep it honest:
+
+- **`graceSecs`** (180) — three consecutive failures at the default cadence,
+  not one blip.
+- **`obsTTLSecs`** (300) — an observation expires. Otherwise one stale negative
+  would keep a node marked down long after it came back.
+- **the observer must be online itself** — if bga loses its WiFi, its ping to
+  mini fails even though mini is fine. Without this, bga would report its own
+  outage as its neighbour's. The observer is judged by chain age alone, never
+  by cross-check, so two nodes that watch each other cannot reason in a circle
+  or take each other down in one blackout.
+
+And one deliberate asymmetry: **a node is never condemned by a single path.**
+"I can't reach it" is not "nobody can reach it" — the broken thing might be the
+route, the mDNS name, or the observer's own Local Network permission. With only
+one negative signal the time-only verdict stands.
+
+**LAN and BLE observations relay second-hand.** Only bga pings mini, so that
+verdict used to be bga's private knowledge: ask entry and you still got the
+time-only answer. They now travel over gossip exactly like specs, and for the
+same reason — `checkedAt`/`lastSeen` let the receiver keep whichever copy is
+newer and drop the stale one. They carry a `by` field naming the observer,
+which is what makes the "observer must be online" rule enforceable downstream.
+The overlay check is the exception: it stays **first-hand only**, because
+relaying "I couldn't reach it" would turn one node's routing problem into a
+fleet-wide verdict.
 
 ## API
 
@@ -85,7 +138,7 @@ Any node answers for all nodes.
 | `GET /api/log/{node}?after=SEQ` | Chain segment (what gossip consumes) |
 | `GET /api/verify/{node}` | Walk the chain, report valid + length |
 | `GET /api/specs` | This node's hardware: model, CPU, cores, RAM, disk, load |
-| `GET /api/capacity` | **Fleet totals** — cores, RAM and disk summed across every non-offline node |
+| `GET /api/capacity` | **Fleet totals** — cores, RAM and disk summed across every reachable node |
 | `GET /api/host` | This node only: battery (`present`/`percent`/`charging`) |
 | `GET /api/ports` | This node's listening ports |
 | `GET /metrics` | Prometheus: this node's specs (+ BLE beacon where configured) |
@@ -105,6 +158,9 @@ this fleet actually have* without anyone SSHing anywhere:
 $ curl -s node:7777/api/capacity | jq '{nodes, coresLog, memTotalGB}'
 { "nodes": 9, "coresLog": 78, "memTotalGB": 106 }
 ```
+
+`isolated` nodes are excluded along with `offline` ones: the machine is powered
+on, but if no network reaches it there is no work you can send it.
 
 Three decisions worth knowing about:
 
@@ -150,6 +206,8 @@ CPU-percentage that would not mean the same thing.
   "locations": { "gateway": "Cloud", "node-b": "Office" },
   "networks": { "aa:bb:cc:dd:ee:ff": "Home WiFi" },
   "lanPeer": "node-c.local",
+  "graceSecs": 180,
+  "obsTTLSecs": 300,
   "tsIP": ""
 }
 ```

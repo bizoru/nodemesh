@@ -69,6 +69,14 @@ type Config struct {
 	// Locations maps node name -> site label (e.g. "gateway": "DigitalOcean").
 	// Shared by every node so any dashboard can group peers by site.
 	Locations map[string]string `json:"locations,omitempty"`
+	// GraceSecs: cuánto tiene que llevar fallando el ping antes de que cuente
+	// como caída. Debe cubrir varios ciclos de CollectSecs para que un blip de
+	// red no tumbe a un nodo sano.
+	GraceSecs int `json:"graceSecs,omitempty"`
+	// ObsTTLSecs: cuánto vale una observación directa. Pasado eso se ignora,
+	// para que un negativo viejo no siga declarando caído a un nodo que ya
+	// volvió. Debe cubrir varios ciclos de CollectSecs.
+	ObsTTLSecs int `json:"obsTTLSecs,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -98,6 +106,12 @@ func loadConfig(path string) (*Config, error) {
 	}
 	if c.GossipSecs == 0 {
 		c.GossipSecs = 120
+	}
+	if c.GraceSecs == 0 {
+		c.GraceSecs = 180 // 3 pings fallidos seguidos con CollectSecs=60
+	}
+	if c.ObsTTLSecs == 0 {
+		c.ObsTTLSecs = 300 // 5 min: sobrevive a un gossip perdido, no a una hora
 	}
 	return &c, nil
 }
@@ -566,6 +580,14 @@ type lanCheckState struct {
 	mu        sync.RWMutex
 	reachable bool
 	checkedAt int64
+	since     int64
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 var lanState lanCheckState
@@ -592,12 +614,25 @@ func lanPeerLoop(cfg *Config) {
 	if cfg.LANPeer == "" {
 		return
 	}
+	var since int64
+	var last = -1 // -1: todavía no hay ninguna medición
 	for {
 		ok := pingHost(cfg.LANPeer)
+		now := time.Now().Unix()
+		if cur := b2i(ok); cur != last {
+			since = now // el resultado cambió: empieza a contar de nuevo
+			last = cur
+		}
 		lanState.mu.Lock()
 		lanState.reachable = ok
-		lanState.checkedAt = time.Now().Unix()
+		lanState.checkedAt = now
+		lanState.since = since
 		lanState.mu.Unlock()
+		// Se publica en el mismo almacén que alimenta el gossip para que
+		// nodeInfos tenga UN solo camino de lectura: la observación propia y
+		// la aprendida de un peer compiten por timestamp, y gana la más nueva.
+		setPeerChecks(lanPeerNode(cfg), cfg.Node,
+			&LANCheck{Reachable: ok, CheckedAt: now, Since: since, By: cfg.Node}, nil)
 		time.Sleep(time.Duration(cfg.CollectSecs) * time.Second)
 	}
 }
@@ -634,9 +669,11 @@ func bleWatchLoop(cfg *Config) {
 		if data, err := os.ReadFile(cfg.BLEStatePath); err == nil {
 			var raw nodebeaconState
 			if json.Unmarshal(data, &raw) == nil {
+				c := BLECheck{PeerStatus: raw.Status, RSSI: raw.RSSI, LastSeen: raw.LastSeen, By: cfg.Node}
 				bleState.mu.Lock()
-				bleState.check = &BLECheck{PeerStatus: raw.Status, RSSI: raw.RSSI, LastSeen: raw.LastSeen}
+				bleState.check = &c
 				bleState.mu.Unlock()
+				setPeerChecks(lanPeerNode(cfg), cfg.Node, nil, &c)
 			}
 		}
 		time.Sleep(time.Duration(cfg.CollectSecs) * time.Second)
@@ -648,6 +685,18 @@ func bleWatchLoop(cfg *Config) {
 type LANCheck struct {
 	Reachable bool  `json:"reachable"`
 	CheckedAt int64 `json:"checkedAt"`
+	// Since: desde cuándo el ping da ESTE resultado sin interrupción. Es lo
+	// que permite juzgar una caída sin depender de la edad de la cadena: la
+	// cadena solo crece en cambios de estado y en el heartbeat de 10 min, así
+	// que un nodo perfectamente sano pasa minutos sin escribir y "hace rato
+	// que no escribe" no distingue un nodo caído de uno callado. "El ping
+	// lleva 3 minutos fallando" sí.
+	Since int64 `json:"since,omitempty"`
+	// By: nodo que hizo el ping. Vacío cuando lo emite el propio observador
+	// (era su única fuente posible); se rellena al relevar por gossip, porque
+	// una observación de segunda mano sin autor no se puede juzgar: hay que
+	// saber quién miró para poder exigir que ESE nodo esté online.
+	By string `json:"by,omitempty"`
 }
 
 // BLECheck: like LANCheck but sourced from nodebeacon's HMAC-authenticated
@@ -659,17 +708,19 @@ type BLECheck struct {
 	PeerStatus string `json:"peerStatus"`
 	RSSI       int    `json:"rssi"`
 	LastSeen   int64  `json:"lastSeen"`
+	By         string `json:"by,omitempty"` // ver LANCheck.By
 }
 
 type nodeInfo struct {
 	Record
-	State    string    `json:"state"` // online | stale | offline
-	TSActive bool      `json:"tsActive"`
-	Location string    `json:"location,omitempty"`
-	Version  string    `json:"version,omitempty"`  // del propio binario; el de los pares llega por gossip
-	LANCheck *LANCheck `json:"lanCheck,omitempty"` // only set by whichever node actually checked
-	BLECheck *BLECheck `json:"bleCheck,omitempty"` // only set by whichever node actually checked
-	Specs    *Specs    `json:"specs,omitempty"`    // propios o aprendidos por gossip (ver specs.go)
+	State        string        `json:"state"` // online | stale | offline
+	TSActive     bool          `json:"tsActive"`
+	Location     string        `json:"location,omitempty"`
+	Version      string        `json:"version,omitempty"`      // del propio binario; el de los pares llega por gossip
+	OverlayCheck *OverlayCheck `json:"overlayCheck,omitempty"` // primera mano: nunca se relaya
+	LANCheck     *LANCheck     `json:"lanCheck,omitempty"`     // only set by whichever node actually checked
+	BLECheck     *BLECheck     `json:"bleCheck,omitempty"`     // only set by whichever node actually checked
+	Specs        *Specs        `json:"specs,omitempty"`        // propios o aprendidos por gossip (ver specs.go)
 }
 
 // Versiones de los pares, aprendidas en cada ronda de gossip al leer su
@@ -706,6 +757,15 @@ func peerNodeName(infos map[string]nodeInfo, peerIP string) string {
 			return n
 		}
 	}
+	// Segundo intento por la IP de LAN: no todos los peers están configurados
+	// por su dirección del overlay (k3s-macbook-pro quedó registrado con la de
+	// su LAN). Sin esto, de esos nodos no se puede saber ni con quién se está
+	// hablando, y toda señal de primera mano sobre ellos se pierde en silencio.
+	for n, info := range infos {
+		if info.LocalIP != "" && info.LocalIP == peerIP {
+			return n
+		}
+	}
 	return ""
 }
 
@@ -720,15 +780,26 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			base = "http://" + peer
 		}
 		// learn peer's node set
+		ip := strings.Split(peer, ":")[0]
 		var infos map[string]nodeInfo
 		if err := getJSON(client, base+"/api/nodes", &infos); err != nil {
-			continue // peer offline; normal
+			// Un peer que no contesta dejó de ser un `continue` mudo: es la
+			// prueba de vida más directa que hay, y su ausencia es media
+			// evidencia de caída (la otra media la pone el ping de LAN).
+			if name := peerNameForIP(ip); name != "" {
+				setOverlayCheck(name, cfg.Node, false, time.Now().Unix())
+			}
+			continue
+		}
+		if name := peerNodeName(infos, ip); name != "" {
+			rememberPeerName(ip, name)
+			setOverlayCheck(name, cfg.Node, true, time.Now().Unix())
 		}
 		for n, info := range infos {
 			known[n] = true
 			// Cada nodo solo conoce con certeza SU propia versión; la que
 			// reporta de terceros es de segunda mano, así que se ignora.
-			if n == peerNodeName(infos, strings.Split(peer, ":")[0]) {
+			if n == peerNodeName(infos, ip) {
 				setPeerVersion(n, info.Version)
 			}
 			// Los specs sí se aceptan de segunda mano: llevan CollectedAt, así
@@ -736,6 +807,11 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			// que un nodo conozca la flota entera aunque no llegue a todos.
 			if n != cfg.Node {
 				setPeerSpecs(n, info.Specs)
+				// Mismo trato para las observaciones directas, y por el mismo
+				// motivo: llevan timestamp, así que la copia rancia se
+				// descarta sola. Es lo que hace que el ping de bga a mini deje
+				// de ser un dato local de bga y lo vea toda la flota.
+				setPeerChecks(n, peerNodeName(infos, ip), info.LANCheck, info.BLECheck)
 			}
 		}
 		// pull chain extensions for every known node
@@ -786,21 +862,30 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 	emitOffline := func(n string) {
 		out[n] = nodeInfo{Record: Record{Node: n}, State: "offline", Location: nodeLocation[n]}
 	}
+	// observerOnline resuelve al autor de una observación SOLO por la edad de
+	// su cadena, nunca por cross-check: bga y mini se observan mutuamente, y
+	// dejar que el veredicto de uno alimente el del otro los haría razonar en
+	// círculo (o tumbarse entre sí en el mismo apagón).
+	observerOnline := func(n string) bool {
+		if n == cfg.Node {
+			return true
+		}
+		head, ok := store.Head(n)
+		return ok && stateByAge(now-head.TS) == stateOnline
+	}
+	grace, obsTTL := int64(cfg.GraceSecs), int64(cfg.ObsTTLSecs)
+
 	for _, n := range store.Nodes() {
 		head, ok := store.Head(n)
 		if !ok {
 			emitOffline(n)
 			continue
 		}
-		// heartbeats land every 10 min; gossip adds up to ~4 min of lag
-		state := "online"
 		age := now - head.TS
-		if age > 45*60 {
-			state = "offline"
-		} else if age > 16*60 {
-			state = "stale"
-		}
-		info := nodeInfo{Record: head, State: state, TSActive: head.TSIP != "", Location: nodeLocation[n]}
+		reach := getPeerChecks(n)
+		info := nodeInfo{Record: head, TSActive: head.TSIP != "", Location: nodeLocation[n],
+			OverlayCheck: reach.Overlay, LANCheck: reach.LAN, BLECheck: reach.BLE,
+			State: crossCheckedState(stateByAge(age), head.TS, reach, now, grace, obsTTL, observerOnline)}
 		if n == cfg.Node {
 			info.Version = version
 			s := localSpecs()
@@ -808,20 +893,6 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 		} else {
 			info.Version = getPeerVersion(n)
 			info.Specs = getPeerSpecs(n)
-		}
-		if n == lanPeerNode(cfg) {
-			lanState.mu.RLock()
-			if lanState.checkedAt > 0 {
-				info.LANCheck = &LANCheck{Reachable: lanState.reachable, CheckedAt: lanState.checkedAt}
-			}
-			lanState.mu.RUnlock()
-
-			bleState.mu.RLock()
-			if bleState.check != nil {
-				c := *bleState.check
-				info.BLECheck = &c
-			}
-			bleState.mu.RUnlock()
 		}
 		out[n] = info
 	}

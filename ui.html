@@ -8,10 +8,12 @@
   :root {
     --bg:#f6f7f9; --card:#ffffff; --text:#1a1d21; --muted:#6b7280;
     --line:#e5e7eb; --ok:#16a34a; --stale:#d97706; --off:#9ca3af; --accent:#2563eb;
+    --isolated:#dc2626;
   }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#111418; --card:#1a1f26; --text:#e5e7eb; --muted:#9ca3af;
-            --line:#2a313a; --ok:#22c55e; --stale:#f59e0b; --off:#6b7280; --accent:#60a5fa; }
+            --line:#2a313a; --ok:#22c55e; --stale:#f59e0b; --off:#6b7280; --accent:#60a5fa;
+            --isolated:#f87171; }
   }
   * { box-sizing:border-box; margin:0; }
   body { background:var(--bg); color:var(--text); font:15px/1.5 system-ui,-apple-system,sans-serif; padding:24px; }
@@ -23,6 +25,10 @@
   .card h2 { font-size:16px; display:flex; align-items:center; gap:8px; }
   .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
   .online .dot { background:var(--ok); } .stale .dot { background:var(--stale); } .offline .dot { background:var(--off); }
+  /* isolated: encendido pero incomunicado. Rojo, no gris: un apagado es un
+     estado en reposo, esto es una avería que alguien está viendo en vivo. */
+  .isolated .dot { background:var(--isolated); }
+  .isolated { border-color:var(--isolated); }
   .site { color:var(--muted); font-size:12px; margin-left:auto; }
   dl { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; margin-top:10px; font-size:13px; }
   dt { color:var(--muted); } dd { font-variant-numeric:tabular-nums; overflow-wrap:anywhere; }
@@ -70,11 +76,29 @@ const fmtTs = t => t ? new Date(t*1000).toLocaleString() : "sin reportes";
 let current = null;
 
 function lanNote(n) {
-  if (!n.lanCheck || n.tsActive) return ""; // solo aporta algo cuando Tailscale está caído
+  // Se muestra cuando Tailscale está caído (el caso de siempre) y también
+  // cuando el cross-check es lo que decidió el estado: ahí la nota deja de ser
+  // un detalle y pasa a ser la explicación de por qué la tarjeta está en rojo.
+  if (!n.lanCheck) return "";
+  if (n.tsActive && n.state !== "offline" && n.state !== "isolated") return "";
   const ageMin = Math.round((Date.now()/1000 - n.lanCheck.checkedAt) / 60);
+  const hace = `hace ${ageMin < 1 ? "&lt;1" : ageMin} min`;
+  // El autor importa: desde que las observaciones se relevan por gossip, esto
+  // puede ser algo que vio otro nodo, no quien está respondiendo.
+  const quien = n.lanCheck.by ? ` · lo vio ${n.lanCheck.by}` : "";
   return n.lanCheck.reachable
-    ? `<div class="lan-note">📶 confirmado vivo por LAN (hace ${ageMin < 1 ? "&lt;1" : ageMin} min), aunque Tailscale esté caído</div>`
-    : `<div class="lan-note">⚠️ tampoco responde por LAN — posible caída real</div>`;
+    ? `<div class="lan-note">📶 confirmado vivo por LAN (${hace})${quien}, aunque Tailscale esté caído</div>`
+    : `<div class="lan-note">⚠️ tampoco responde por LAN (${hace})${quien} — caída confirmada por dos vías</div>`;
+}
+
+// overlayNote: el contacto directo por el overlay. Es la señal que decide que
+// un nodo está vivo, así que cuando FALLA conviene verla explicada y no
+// deducirla del color de la tarjeta.
+function overlayNote(n) {
+  const o = n.overlayCheck;
+  if (!o || o.ok) return "";
+  const min = Math.round((Date.now()/1000 - (o.since || o.at)) / 60);
+  return `<div class="lan-note">🔌 sin contacto por el overlay desde hace ${min < 1 ? "&lt;1" : min} min${o.by ? ` (lo intenta ${o.by})` : ""}</div>`;
 }
 
 function bleNote(n) {
@@ -84,7 +108,9 @@ function bleNote(n) {
   // diferencia del LAN check, esto también confirma "tiene internet" o no,
   // no solo "está prendido".
   const estado = n.bleCheck.peerStatus === "ok" ? "con internet" : "SIN internet";
-  return `<div class="lan-note">📡 bluetooth: ${estado} (rssi ${n.bleCheck.rssi}dBm, hace ${ageMin < 1 ? "&lt;1" : ageMin} min)</div>`;
+  const quien = n.bleCheck.by ? ` · lo oyó ${n.bleCheck.by}` : "";
+  const vivo = n.state === "isolated" ? " — sigue encendido, la radio lo ve" : "";
+  return `<div class="lan-note">📡 bluetooth: ${estado} (rssi ${n.bleCheck.rssi}dBm, hace ${ageMin < 1 ? "&lt;1" : ageMin} min)${quien}${vivo}</div>`;
 }
 
 const fmtGB = v => v == null ? "—" : (v >= 1024 ? (v/1024).toFixed(1)+" TB" : Math.round(v)+" GB");
@@ -151,6 +177,7 @@ async function refresh() {
         <dt>last seen</dt><dd>${fmtTs(n.ts)}</dd>
         <dt>versión</dt><dd>${n.version || "—"}</dd>
       </dl>
+      ${overlayNote(n)}
       ${lanNote(n)}
       ${bleNote(n)}
       ${specsBlock(n)}`;
