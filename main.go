@@ -936,6 +936,9 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 	// tiene cadena todavía (recién agregados al tailnet, o nunca vistos):
 	// también salen, offline, en vez de faltar en la página.
 	for n := range nodeLocation {
+		if forgottenNodes[n] {
+			continue
+		}
 		if _, ok := out[n]; !ok {
 			emitOffline(n)
 		}
