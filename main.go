@@ -92,6 +92,13 @@ type Config struct {
 	HeartbeatURL   string `json:"heartbeatURL,omitempty"`
 	HeartbeatToken string `json:"heartbeatToken,omitempty"`
 	HeartbeatSecs  int    `json:"heartbeatSecs,omitempty"`
+	// ForgetNodes: nombres de nodos DADOS DE BAJA. nodemesh los ignora aunque un
+	// peer se los ofrezca por gossip, no los muestra en /api/nodes, y borra su log
+	// al arrancar. Necesario porque el gossip re-descubre nodos de los peers, así
+	// que borrar el log de uno no basta: se re-aprende. Con el nombre aquí, el
+	// nodo queda olvidado de verdad y de forma robusta ante peers sucios (p.ej. un
+	// nodo caído que vuelve con el log viejo). Ej: ["bga-mbp-i9"].
+	ForgetNodes []string `json:"forgetNodes,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -118,6 +125,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 	for n, loc := range c.Locations {
 		nodeLocation[n] = loc
+	}
+	for _, n := range c.ForgetNodes {
+		forgottenNodes[n] = true
 	}
 	if c.GossipSecs == 0 {
 		c.GossipSecs = 120
@@ -187,6 +197,10 @@ func openStore(dir string) (*Store, error) {
 			continue
 		}
 		node := strings.TrimSuffix(e.Name(), ".jsonl")
+		if forgottenNodes[node] {
+			os.Remove(filepath.Join(dir, e.Name()))
+			continue
+		}
 		recs, err := readChainFile(filepath.Join(dir, e.Name()))
 		if err != nil {
 			log.Printf("store: skipping %s: %v", e.Name(), err)
@@ -583,6 +597,7 @@ func normMAC(s string) string {
 // dashboard knows about, so a node absent from every peer's log still shows
 // up as offline instead of vanishing.
 var nodeLocation = map[string]string{}
+var forgottenNodes = map[string]bool{}
 
 // lanPeerNode derives the mesh node name from an mDNS hostname by stripping
 // ".local" — true for both "host.local" and "host", so one config field
@@ -811,6 +826,9 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			setOverlayCheck(name, cfg.Node, true, time.Now().Unix())
 		}
 		for n, info := range infos {
+			if forgottenNodes[n] {
+				continue
+			}
 			known[n] = true
 			// Cada nodo solo conoce con certeza SU propia versión; la que
 			// reporta de terceros es de segunda mano, así que se ignora.
@@ -891,6 +909,9 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 	grace, obsTTL := int64(cfg.GraceSecs), int64(cfg.ObsTTLSecs)
 
 	for _, n := range store.Nodes() {
+		if forgottenNodes[n] {
+			continue
+		}
 		head, ok := store.Head(n)
 		if !ok {
 			emitOffline(n)
