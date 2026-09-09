@@ -18,9 +18,10 @@ GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/nodem
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/nodemesh-windows-amd64.exe .
 
 # rigby (HP Stream 7): Windows 8.1 de 32 bits. Go 1.21 subió el mínimo a
-# Windows 10 y el binario ni arranca allí, así que este target —y sólo este—
-# se compila con el toolchain 1.20, el último que produce ejecutables válidos
-# para 8.1. Instalar una vez con:
+# Windows 10; un binario 386 de un toolchain actual SÍ arranca allí (probado),
+# pero "funciona aunque nadie lo prueba" no es base para el servicio que tiene
+# que ser creíble cuando lo demás se cae, así que este target —y sólo este— se
+# compila con 1.20, el último soportado en 8.1. Instalar una vez con:
 #   go install golang.org/dl/go1.20.14@latest && go1.20.14 download
 GO120="${GO120:-$(command -v go1.20.14 || echo "$HOME/go/bin/go1.20.14")}"
 if [ -x "$GO120" ]; then

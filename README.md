@@ -234,10 +234,13 @@ safe to read, never edit by hand (it breaks the chain).
 
 `go.mod` pins **Go 1.20** on purpose. Go 1.21 raised the Windows minimum to
 Windows 10, and `rigby` — an HP Stream 7 tablet on 32-bit Windows 8.1 — is a
-node. A binary built with anything newer does not start there at all. The code
-is plain standard library, so staying on 1.20 costs nothing; `build.sh` uses
-the 1.20 toolchain only for the `windows/386` target and builds everything else
-with whatever `go` is on PATH:
+node. Dropping support means untested, not refusing to start: a `windows/386`
+binary from a current toolchain does run there, verified. But "works today,
+untested by upstream" is a bad thing to depend on for a service meant to be
+believed when everything else is down, and the code is plain standard library,
+so staying on the last supported toolchain costs nothing. `build.sh` uses 1.20
+for the `windows/386` target only and builds everything else with whatever `go`
+is on PATH:
 
 ```sh
 go install golang.org/dl/go1.20.14@latest && go1.20.14 download
