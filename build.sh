@@ -16,4 +16,17 @@ GOOS=darwin  GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/nodem
 GOOS=linux   GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/nodemesh-linux-amd64 .
 GOOS=linux   GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/nodemesh-linux-arm64 .
 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/nodemesh-windows-amd64.exe .
+
+# rigby (HP Stream 7): Windows 8.1 de 32 bits. Go 1.21 subió el mínimo a
+# Windows 10 y el binario ni arranca allí, así que este target —y sólo este—
+# se compila con el toolchain 1.20, el último que produce ejecutables válidos
+# para 8.1. Instalar una vez con:
+#   go install golang.org/dl/go1.20.14@latest && go1.20.14 download
+GO120="${GO120:-$(command -v go1.20.14 || echo "$HOME/go/bin/go1.20.14")}"
+if [ -x "$GO120" ]; then
+  GOOS=windows GOARCH=386 "$GO120" build -trimpath -ldflags="${LDFLAGS}" -o dist/nodemesh-windows-386.exe . \
+    && echo "windows/386 (Win8.1) compilado con $("$GO120" version | awk '{print $3}')"
+else
+  echo "AVISO: sin go1.20.14, no se compila windows/386 (rigby se queda sin actualizar)" >&2
+fi
 ls -lh dist/

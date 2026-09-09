@@ -58,6 +58,15 @@ type Config struct {
 	// escuchando sólo en loopback — invisible para el resto del mesh.
 	// Si está vacío se usa la autodetección de siempre.
 	TSIP string `json:"tsIP,omitempty"`
+	// BindIP: dirección EXTRA donde escuchar, para nodos que no están en el
+	// overlay. nodemesh nunca bindea 0.0.0.0 a propósito: escucha en loopback
+	// y en el tsIP, así que un host sin Tailscale queda invisible para el
+	// resto del mesh. rigby (el HP Stream 7, Windows 8.1, que no puede entrar
+	// al tailnet) es alcanzable sólo por la LAN desde athena, y esto le deja
+	// escuchar ahí sin fingir una IP de overlay que no tiene: TSIP se usa para
+	// el bind Y se publica en la cadena, así que rellenarlo con una IP de LAN
+	// haría que el mesh entero reportara un overlay inexistente.
+	BindIP string `json:"bindIP,omitempty"`
 	// BLEStatePath: absolute path to a companion BLE beacon's state.json.
 	// Set only on nodes paired over Bluetooth. That beacon runs as a
 	// per-user LaunchAgent while nodemesh runs as root, so this must be an
@@ -1093,6 +1102,10 @@ func main() {
 
 	mux := newMux(cfg, store)
 	go serveOn("127.0.0.1:"+fmt.Sprint(cfg.Port), mux)
+	// Nodo fuera del overlay: escucha además en su IP de LAN (ver BindIP).
+	if cfg.BindIP != "" {
+		go serveOn(cfg.BindIP+":"+fmt.Sprint(cfg.Port), mux)
+	}
 	// bind tailscale IP (retry until present, rebind if it changes)
 	debugUnaVez := false
 	for {

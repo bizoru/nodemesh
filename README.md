@@ -232,6 +232,49 @@ restart the service"; `deploy/nodemesh.service` is a systemd unit, and macOS
 runs it fine as a root LaunchDaemon. Data is append-only JSONL per node —
 safe to read, never edit by hand (it breaks the chain).
 
+`go.mod` pins **Go 1.20** on purpose. Go 1.21 raised the Windows minimum to
+Windows 10, and `rigby` — an HP Stream 7 tablet on 32-bit Windows 8.1 — is a
+node. A binary built with anything newer does not start there at all. The code
+is plain standard library, so staying on 1.20 costs nothing; `build.sh` uses
+the 1.20 toolchain only for the `windows/386` target and builds everything else
+with whatever `go` is on PATH:
+
+```sh
+go install golang.org/dl/go1.20.14@latest && go1.20.14 download
+```
+
+Without it `build.sh` still succeeds and just skips that one target, with a
+warning — the other six nodes are not held hostage by a tablet.
+
+### A node that is not on the overlay
+
+nodemesh never binds `0.0.0.0`. It listens on loopback and on the node's
+Tailscale address, which is what keeps a status service with no authentication
+off the physical LAN. `rigby` cannot join the tailnet (Windows 8.1 stopped
+getting patches), and is reachable only over the LAN from `athena`, the one
+node that shares it. For that case `bindIP` adds a **second** listening
+address:
+
+```json
+{ "node": "rigby", "bindIP": "192.168.101.88", "peers": ["192.168.101.93"] }
+```
+
+The obvious shortcut — putting the LAN address in `tsIP` — is wrong: `tsIP` is
+not only the bind address, it is written into the chain and gossiped, so the
+whole mesh would report an overlay that does not exist. With `bindIP` the node
+honestly reports no overlay address and the cross-check keeps working.
+
+Reachability is one-way and that is fine. Only `athena` can pull rigby's chain;
+everyone else gets it **second-hand through athena**, which is exactly what
+pull gossip is for — the log replicates, the node does not have to be routable
+from every peer. The cost is that rigby is only observable while athena is up.
+Its firewall rule is scoped to athena's address alone, not to the subnet:
+
+```
+netsh advfirewall firewall add rule name="nodemesh" dir=in action=allow \
+  protocol=TCP localport=7777 remoteip=192.168.101.93 profile=any
+```
+
 ### Windows
 
 `deploy/nodemesh-task-windows.xml` registers it as a boot-triggered scheduled
