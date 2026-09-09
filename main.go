@@ -86,6 +86,12 @@ type Config struct {
 	// para que un negativo viejo no siga declarando caído a un nodo que ya
 	// volvió. Debe cubrir varios ciclos de CollectSecs.
 	ObsTTLSecs int `json:"obsTTLSecs,omitempty"`
+	// HeartbeatURL: endpoint público (gcp-east vía Funnel) al que este nodo
+	// empuja "sigo vivo" por internet plano, independiente del tailnet. Vacío =
+	// no manda heartbeat. Ver heartbeat.go.
+	HeartbeatURL   string `json:"heartbeatURL,omitempty"`
+	HeartbeatToken string `json:"heartbeatToken,omitempty"`
+	HeartbeatSecs  int    `json:"heartbeatSecs,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -1099,6 +1105,8 @@ func main() {
 	go lanPeerLoop(cfg)
 	// BLE beacon state watch loop (only when BLEStatePath is set — see Config)
 	go bleWatchLoop(cfg)
+	// heartbeat push a endpoint público (solo si HeartbeatURL está puesto)
+	go heartbeatLoop(cfg)
 
 	mux := newMux(cfg, store)
 	go serveOn("127.0.0.1:"+fmt.Sprint(cfg.Port), mux)
