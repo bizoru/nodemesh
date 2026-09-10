@@ -75,6 +75,16 @@ type Config struct {
 	// it works even when both Tailscale AND the shared LAN are down (it's a
 	// direct Bluetooth link between the pair, no router involved).
 	BLEStatePath string `json:"bleStatePath,omitempty"`
+
+	// BLEPeer: nombre de nodo del vecino que emite el beacon BLE, cuando no
+	// coincide con LANPeer. Nacio el 2026-09-10: hasta entonces el vecino de
+	// BLE se deducia de LANPeer, porque la unica pareja (bga-mbp-i9 y
+	// steven-mini) compartia LAN y Bluetooth a la vez. Al retirarse bga, su
+	// relevo en Bucaramanga —x1-nano— quedo al alcance del Bluetooth del mini
+	// pero en OTRA red IP, asi que ya no hay LANPeer que valga y sin este
+	// campo el beacon se publicaba sin nombre de vecino. Vacio = se usa
+	// LANPeer, como siempre.
+	BLEPeer string `json:"blePeer,omitempty"`
 	// Locations maps node name -> site label (e.g. "gateway": "DigitalOcean").
 	// Shared by every node so any dashboard can group peers by site.
 	Locations map[string]string `json:"locations,omitempty"`
@@ -607,6 +617,16 @@ func lanPeerNode(cfg *Config) string {
 	return strings.TrimSuffix(cfg.LANPeer, ".local")
 }
 
+// blePeerNode nombra al vecino del beacon BLE. Por omision es el mismo que el
+// de LAN —lo normal cuando las dos maquinas comparten casa y router—, pero
+// BLEPeer permite separarlos cuando el Bluetooth llega y la red IP no.
+func blePeerNode(cfg *Config) string {
+	if cfg.BLEPeer != "" {
+		return strings.TrimSuffix(cfg.BLEPeer, ".local")
+	}
+	return lanPeerNode(cfg)
+}
+
 type lanCheckState struct {
 	mu        sync.RWMutex
 	reachable bool
@@ -704,7 +724,7 @@ func bleWatchLoop(cfg *Config) {
 				bleState.mu.Lock()
 				bleState.check = &c
 				bleState.mu.Unlock()
-				setPeerChecks(lanPeerNode(cfg), cfg.Node, nil, &c)
+				setPeerChecks(blePeerNode(cfg), cfg.Node, nil, &c)
 			}
 		}
 		time.Sleep(time.Duration(cfg.CollectSecs) * time.Second)
@@ -1024,7 +1044,7 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 		if c == nil {
 			return
 		}
-		peer := lanPeerNode(cfg)
+		peer := blePeerNode(cfg)
 		up := 0
 		if c.PeerStatus == "ok" {
 			up = 1

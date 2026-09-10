@@ -13,5 +13,6 @@
   "networks": {
     "aa:bb:cc:dd:ee:ff": "Home WiFi"
   },
-  "lanPeer": "node-c.local"
+  "lanPeer": "node-c.local",
+  "blePeer": ""
 }

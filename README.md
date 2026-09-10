@@ -67,7 +67,9 @@ nodemesh checks independent paths and reports them separately:
   name on the shared physical LAN. No credentials, no HTTP.
 - **Bluetooth** — if `bleStatePath` is set, the last state written by a
   companion BLE beacon: a direct radio link that survives both the overlay
-  and the LAN being down.
+  and the LAN being down. The neighbour is named by `lanPeer`, or by
+  `blePeer` when radio reaches further than the IP LAN does and the two are
+  not the same machine.
 
 So the dashboard can say *"off the overlay, but answering on the LAN"*
 instead of a misleading *"offline"*. These signals are deliberately **not**
@@ -206,6 +208,7 @@ CPU-percentage that would not mean the same thing.
   "locations": { "gateway": "Cloud", "node-b": "Office" },
   "networks": { "aa:bb:cc:dd:ee:ff": "Home WiFi" },
   "lanPeer": "node-c.local",
+  "blePeer": "",
   "graceSecs": 180,
   "obsTTLSecs": 300,
   "tsIP": ""
