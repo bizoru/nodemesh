@@ -56,7 +56,7 @@ func TestCaidaCortaSeVeCuandoElHermanoDeLANLaConfirma(t *testing.T) {
 		t.Fatalf("sin observación el veredicto por tiempo no cambia: %q", got)
 	}
 
-	r := reachability{Overlay: overlay(false, 30, 4*60, "entry"), LAN: lan(false, 30, 4*60, "bga-mbp-i9")}
+	r := reachability{Overlay: overlay(false, 30, 4*60, "entry"), LAN: lan(false, 30, 4*60, "dell-xps")}
 	if got := state(age, r, todoOnline); got != stateOffline {
 		t.Errorf("con el LAN confirmando la caída = %q, quería %q", got, stateOffline)
 	}
@@ -67,7 +67,7 @@ func TestCaidaCortaSeVeCuandoElHermanoDeLANLaConfirma(t *testing.T) {
 // con la luz y el Bluetooth fue el único testigo que quedó en pie.
 func TestBLEVetaElOfflineYLoDejaEnIsolated(t *testing.T) {
 	r := reachability{Overlay: overlay(false, 30, 4*60, "entry"),
-		LAN: lan(false, 30, 4*60, "bga-mbp-i9"), BLE: ble(60, "bga-mbp-i9")}
+		LAN: lan(false, 30, 4*60, "dell-xps"), BLE: ble(60, "dell-xps")}
 	if got := state(6*60, r, todoOnline); got != stateIsolated {
 		t.Errorf("LAN caído pero BLE vivo = %q, quería %q", got, stateIsolated)
 	}
@@ -76,11 +76,11 @@ func TestBLEVetaElOfflineYLoDejaEnIsolated(t *testing.T) {
 // La otra dirección, que ya era la promesa del README: una prueba de vida
 // directa impide declarar caído a un nodo que solo perdió el overlay.
 func TestElLANVivoImpideElOfflinePorTiempo(t *testing.T) {
-	r := reachability{LAN: lan(true, 30, 3*60*60, "bga-mbp-i9")}
+	r := reachability{LAN: lan(true, 30, 3*60*60, "dell-xps")}
 	if got := state(3*60*60, r, todoOnline); got != stateStale {
 		t.Errorf("3h sin reportar pero vivo en LAN = %q, quería %q", got, stateStale)
 	}
-	rb := reachability{BLE: ble(60, "bga-mbp-i9")}
+	rb := reachability{BLE: ble(60, "dell-xps")}
 	if got := state(3*60*60, rb, todoOnline); got != stateIsolated {
 		t.Errorf("3h sin reportar pero la radio lo ve = %q, quería %q", got, stateIsolated)
 	}
@@ -89,7 +89,7 @@ func TestElLANVivoImpideElOfflinePorTiempo(t *testing.T) {
 // El grace existe para que un blip de red no tumbe a un nodo sano: hace falta
 // que el ping lleve VARIOS ciclos fallando, no uno suelto.
 func TestUnPingFallidoSueltoNoTumbaANadie(t *testing.T) {
-	r := reachability{Overlay: overlay(false, 10, 30, "entry"), LAN: lan(false, 10, 30, "bga-mbp-i9")} // falla hace 30 s
+	r := reachability{Overlay: overlay(false, 10, 30, "entry"), LAN: lan(false, 10, 30, "dell-xps")} // falla hace 30 s
 	if got := state(6*60, r, todoOnline); got != stateOnline {
 		t.Errorf("un blip de 30 s = %q, quería %q", got, stateOnline)
 	}
@@ -106,7 +106,7 @@ func TestUnNodoVivoQueLlevaRatoCalladoNoSeMarcaCaido(t *testing.T) {
 	// así que las dos condiciones se cumplían con el nodo perfectamente vivo.
 	// Lo que lo desmiente es que el gossip SÍ le habla y contesta.
 	r := reachability{Overlay: overlay(true, 30, 10*60, "entry"),
-		LAN: lan(false, 30, 10*60, "bga-mbp-i9")}
+		LAN: lan(false, 30, 10*60, "dell-xps")}
 	if got := state(9*60, r, todoOnline); got != stateOnline {
 		t.Errorf("contesta el gossip pero no el ping = %q, quería %q", got, stateOnline)
 	}
@@ -117,11 +117,11 @@ func TestUnNodoVivoQueLlevaRatoCalladoNoSeMarcaCaido(t *testing.T) {
 	}
 }
 
-// Falso positivo clásico: a bga se le cae el WiFi, su ping a mini falla, y sin
-// este filtro bga reportaría su propia avería como una caída de mini.
+// Falso positivo clásico: al observador se le cae el WiFi, su ping al vecino
+// falla, y sin este filtro reportaría su propia avería como una caída ajena.
 func TestNoSeCreeAUnObservadorCaido(t *testing.T) {
-	r := reachability{Overlay: overlay(false, 30, 4*60, "entry"), LAN: lan(false, 30, 4*60, "bga-mbp-i9")}
-	obs := func(n string) bool { return n != "bga-mbp-i9" }
+	r := reachability{Overlay: overlay(false, 30, 4*60, "entry"), LAN: lan(false, 30, 4*60, "dell-xps")}
+	obs := func(n string) bool { return n != "dell-xps" }
 	if got := state(6*60, r, obs); got != stateOnline {
 		t.Errorf("observación de un observador caído = %q, quería %q", got, stateOnline)
 	}
@@ -131,7 +131,7 @@ func TestNoSeCreeAUnObservadorCaido(t *testing.T) {
 // nodo vuelve, su cadena manda otra vez.
 func TestLaObservacionRanciaSeIgnora(t *testing.T) {
 	r := reachability{Overlay: overlay(false, 20*60, 30*60, "entry"),
-		LAN: lan(false, 20*60, 30*60, "bga-mbp-i9")} // medidas hace 20 min > obsTTL
+		LAN: lan(false, 20*60, 30*60, "dell-xps")} // medidas hace 20 min > obsTTL
 	if got := state(6*60, r, todoOnline); got != stateOnline {
 		t.Errorf("observación caducada = %q, quería %q", got, stateOnline)
 	}
@@ -143,21 +143,21 @@ func TestSetPeerChecksSeQuedaConLoMasNuevo(t *testing.T) {
 	peerChecks.lan = map[string]LANCheck{}
 	peerChecks.ble = map[string]BLECheck{}
 
-	setPeerChecks("steven-mini", "bga-mbp-i9", &LANCheck{Reachable: true, CheckedAt: 100}, nil)
+	setPeerChecks("steven-mini", "dell-xps", &LANCheck{Reachable: true, CheckedAt: 100}, nil)
 	setPeerChecks("steven-mini", "entry", &LANCheck{Reachable: false, CheckedAt: 50}, nil)
 	if got := getPeerChecks("steven-mini"); got.LAN.CheckedAt != 100 || !got.LAN.Reachable {
 		t.Errorf("una observación vieja pisó a la nueva: %+v", got.LAN)
 	}
-	if got := getPeerChecks("steven-mini"); got.LAN.By != "bga-mbp-i9" {
-		t.Errorf("autor = %q, quería bga-mbp-i9", got.LAN.By)
+	if got := getPeerChecks("steven-mini"); got.LAN.By != "dell-xps" {
+		t.Errorf("autor = %q, quería dell-xps", got.LAN.By)
 	}
 
-	setPeerChecks("steven-mini", "bga-mbp-i9", &LANCheck{Reachable: false, CheckedAt: 200}, nil)
+	setPeerChecks("steven-mini", "dell-xps", &LANCheck{Reachable: false, CheckedAt: 200}, nil)
 	if got := getPeerChecks("steven-mini"); got.LAN.Reachable {
 		t.Error("la observación más nueva no reemplazó a la anterior")
 	}
 	// Sin timestamp no hay forma de ordenarla: se descarta en vez de pisar.
-	setPeerChecks("steven-mini", "bga-mbp-i9", &LANCheck{Reachable: true, CheckedAt: 0}, nil)
+	setPeerChecks("steven-mini", "dell-xps", &LANCheck{Reachable: true, CheckedAt: 0}, nil)
 	if got := getPeerChecks("steven-mini"); got.LAN.CheckedAt != 200 {
 		t.Error("una observación sin timestamp entró igual")
 	}
@@ -179,7 +179,7 @@ func TestUnaSolaViaNegativaNoDeclaraCaida(t *testing.T) {
 // El contacto por overlay manda sobre todo lo demás: es prueba de vida directa.
 func TestElContactoPorOverlayGanaATodo(t *testing.T) {
 	r := reachability{Overlay: overlay(true, 30, 60, "entry"),
-		LAN: lan(false, 30, 60*60, "bga-mbp-i9")}
+		LAN: lan(false, 30, 60*60, "dell-xps")}
 	if got := state(3*60*60, r, todoOnline); got != stateOnline {
 		t.Errorf("contesta ahora mismo = %q, quería %q", got, stateOnline)
 	}

@@ -85,10 +85,10 @@ func stateByAge(age int64) string {
 // el ping.
 //
 // observerOnline responde si el nodo que hizo la observación está él mismo
-// online. Es la salvaguarda contra el falso positivo obvio: si a bga se le cae
-// el WiFi, su ping a mini falla aunque mini esté perfecto, y sin este filtro
-// bga arrastraría a mini a "offline" al reportar su propia avería como si
-// fuera ajena. Una observación de un observador caído no vale nada.
+// online. Es la salvaguarda contra el falso positivo obvio: si al observador se
+// le cae el WiFi, su ping al vecino falla aunque el vecino esté perfecto, y sin
+// este filtro el observador arrastraría al vecino a "offline" al reportar su
+// propia avería como si fuera ajena. Una observación de un observador caído no vale nada.
 //
 // obsTTL descarta la observación rancia — un negativo de hace horas no puede
 // seguir declarando caído a un nodo indefinidamente.
@@ -151,9 +151,9 @@ func crossCheckedState(byAge string, headTS int64, r reachability, now, grace, o
 
 // ---------- relevo de observaciones por gossip ----------
 //
-// El ping de LAN a mini solo lo hace bga, así que hasta ahora solo bga podía
-// contar esa historia: quien preguntara a entry o athena seguía viendo el
-// veredicto por tiempo. Se relevan de segunda mano por la misma razón que los
+// El ping de LAN lo hace un solo nodo —el vecino de LAN del sujeto—, así que
+// hasta ahora solo él podía contar esa historia: quien preguntara a entry o
+// athena seguía viendo el veredicto por tiempo. Se relevan de segunda mano por la misma razón que los
 // Specs y con el mismo mecanismo: llevan timestamp propio (CheckedAt/LastSeen),
 // así que el receptor siempre puede quedarse con la copia más nueva y tirar la
 // rancia. Sin ese timestamp el relevo acabaría sirviendo un negativo viejo

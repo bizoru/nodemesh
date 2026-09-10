@@ -97,7 +97,8 @@ type Config struct {
 	// al arrancar. Necesario porque el gossip re-descubre nodos de los peers, así
 	// que borrar el log de uno no basta: se re-aprende. Con el nombre aquí, el
 	// nodo queda olvidado de verdad y de forma robusta ante peers sucios (p.ej. un
-	// nodo caído que vuelve con el log viejo). Ej: ["bga-mbp-i9"].
+	// nodo caído que vuelve con el log viejo). Hoy lleva "bga-mbp-i9", la
+	// máquina de Bucaramanga que Steven borró del tailnet el 2026-09-09.
 	ForgetNodes []string `json:"forgetNodes,omitempty"`
 }
 
@@ -842,8 +843,8 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 				setPeerSpecs(n, info.Specs)
 				// Mismo trato para las observaciones directas, y por el mismo
 				// motivo: llevan timestamp, así que la copia rancia se
-				// descarta sola. Es lo que hace que el ping de bga a mini deje
-				// de ser un dato local de bga y lo vea toda la flota.
+				// descarta sola. Es lo que hace que el ping de LAN de un nodo a
+				// su vecino deje de ser un dato local suyo y lo vea la flota.
 				setPeerChecks(n, peerNodeName(infos, ip), info.LANCheck, info.BLECheck)
 			}
 		}
@@ -896,9 +897,9 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 		out[n] = nodeInfo{Record: Record{Node: n}, State: "offline", Location: nodeLocation[n]}
 	}
 	// observerOnline resuelve al autor de una observación SOLO por la edad de
-	// su cadena, nunca por cross-check: bga y mini se observan mutuamente, y
-	// dejar que el veredicto de uno alimente el del otro los haría razonar en
-	// círculo (o tumbarse entre sí en el mismo apagón).
+	// su cadena, nunca por cross-check: dos vecinos de LAN se observan
+	// mutuamente, y dejar que el veredicto de uno alimente el del otro los haría
+	// razonar en círculo (o tumbarse entre sí en el mismo apagón).
 	observerOnline := func(n string) bool {
 		if n == cfg.Node {
 			return true

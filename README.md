@@ -105,9 +105,9 @@ Three guards keep it honest:
   not one blip.
 - **`obsTTLSecs`** (300) — an observation expires. Otherwise one stale negative
   would keep a node marked down long after it came back.
-- **the observer must be online itself** — if bga loses its WiFi, its ping to
-  mini fails even though mini is fine. Without this, bga would report its own
-  outage as its neighbour's. The observer is judged by chain age alone, never
+- **the observer must be online itself** — if the observer loses its WiFi, its
+  ping to the neighbour fails even though the neighbour is fine. Without this,
+  the observer would report its own outage as its neighbour's. The observer is judged by chain age alone, never
   by cross-check, so two nodes that watch each other cannot reason in a circle
   or take each other down in one blackout.
 
@@ -116,9 +116,9 @@ And one deliberate asymmetry: **a node is never condemned by a single path.**
 route, the mDNS name, or the observer's own Local Network permission. With only
 one negative signal the time-only verdict stands.
 
-**LAN and BLE observations relay second-hand.** Only bga pings mini, so that
-verdict used to be bga's private knowledge: ask entry and you still got the
-time-only answer. They now travel over gossip exactly like specs, and for the
+**LAN and BLE observations relay second-hand.** Only the observer pings its LAN
+neighbour, so that verdict used to be private to it: ask entry and you still got
+the time-only answer. They now travel over gossip exactly like specs, and for the
 same reason — `checkedAt`/`lastSeen` let the receiver keep whichever copy is
 newer and drop the stale one. They carry a `by` field naming the observer,
 which is what makes the "observer must be online" rule enforceable downstream.
