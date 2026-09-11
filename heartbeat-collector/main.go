@@ -18,21 +18,42 @@ import (
 )
 
 type Config struct {
-	Listen        string            `json:"listen"`         // ej "127.0.0.1:9099" (Funnel apunta aquí)
-	Token         string            `json:"token"`          // compartido con los nodos
-	StatePath     string            `json:"statePath"`      // ej "/var/lib/heartbeat/state.json"
-	TelegramToken string            `json:"telegramToken"`
-	TelegramChat  string            `json:"telegramChat"`
-	DeadAfterSecs int               `json:"deadAfterSecs"`  // silencio máximo antes de alertar
-	RealertHours  int               `json:"realertHours"`
-	Expect        []string          `json:"expect"`         // nodos que SE esperan (alertar si nunca llegan)
-	Locations     map[string]string `json:"locations,omitempty"`
+	Listen        string   `json:"listen"`    // ej "127.0.0.1:9099" (Funnel apunta aquí)
+	Token         string   `json:"token"`     // compartido con los nodos
+	StatePath     string   `json:"statePath"` // ej "/var/lib/heartbeat/state.json"
+	TelegramToken string   `json:"telegramToken"`
+	TelegramChat  string   `json:"telegramChat"`
+	DeadAfterSecs int      `json:"deadAfterSecs"` // silencio máximo antes de alertar
+	RealertHours  int      `json:"realertHours"`
+	Expect        []string `json:"expect"` // nodos que SE esperan (alertar si nunca llegan)
+	// Nodos MOVILES: se siguen (su last_seen sirve para diagnosticar) pero NUNCA
+	// alertan al irse ni al volver. Un portatil que se cierra, el R1 en el
+	// bolsillo o una tablet que se guarda no son incidentes: son lo normal.
+	// Steven, 2026-09-11: "los nodos moviles son efimeros, son opcionales, que
+	// no me alerte cuando un nodo movil se va".
+	//
+	// OJO: infra-watchdog (en entry) mantiene la MISMA lista bajo el nombre
+	// "nodos_intermitentes". Son dos vigilantes distintos a proposito —este vive
+	// fuera de entry para no compartir su SPOF— pero si las listas se separan,
+	// uno callara y el otro no. Al tocar una, tocar la otra.
+	Moviles   []string          `json:"moviles,omitempty"`
+	Locations map[string]string `json:"locations,omitempty"`
+}
+
+// esMovil dice si un nodo esta exento de alertar por ausencia.
+func esMovil(node string) bool {
+	for _, m := range cfg.Moviles {
+		if m == node {
+			return true
+		}
+	}
+	return false
 }
 
 type NodeState struct {
-	LastSeen int64 `json:"last_seen"`
-	Uptime   int64 `json:"uptime"`
-	Down     bool  `json:"down"`
+	LastSeen  int64 `json:"last_seen"`
+	Uptime    int64 `json:"uptime"`
+	Down      bool  `json:"down"`
 	LastAlert int64 `json:"last_alert"`
 }
 type State struct {
@@ -111,7 +132,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	out := map[string]any{}
 	for n, ns := range state.Nodes {
-		out[n] = map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime}
+		out[n] = map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime, "movil": esMovil(n)}
 	}
 	json.NewEncoder(w).Encode(out)
 }
@@ -126,6 +147,13 @@ func deadManLoop() {
 			ns := state.Nodes[node]
 			if ns == nil {
 				// nunca reportó desde que arrancó el colector: aún no alertamos
+				continue
+			}
+			if esMovil(node) {
+				// Se sigue registrando su last_seen, pero irse no es un incidente.
+				// Ademas se limpia Down para que al volver no dispare el "✅ volvió
+				// a reportar" de handleHB por un estado anterior a esta exencion.
+				ns.Down = false
 				continue
 			}
 			silent := now - ns.LastSeen
