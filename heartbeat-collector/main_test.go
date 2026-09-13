@@ -27,3 +27,22 @@ func TestSinListaNadieQuedaExento(t *testing.T) {
 		t.Error("sin lista configurada no debe eximir a nadie")
 	}
 }
+
+// MCL-199: el mensaje del dead-man tiene que traer memoria cuando la hay, y
+// no inventar un "0/0 MB (0%)" cuando un cliente viejo (o un nodo movil que
+// nunca la mando) no la trajo nunca.
+func TestMemInfoSuffixConDatos(t *testing.T) {
+	ns := &NodeState{MemUsedMB: 3502, MemTotalMB: 4096}
+	got := memInfoSuffix(ns)
+	want := " Última memoria conocida: 3502/4096 MB (85%)."
+	if got != want {
+		t.Errorf("memInfoSuffix() = %q, want %q", got, want)
+	}
+}
+
+func TestMemInfoSuffixSinDatos(t *testing.T) {
+	ns := &NodeState{}
+	if got := memInfoSuffix(ns); got != "" {
+		t.Errorf("memInfoSuffix() sin memoria = %q, want vacio", got)
+	}
+}

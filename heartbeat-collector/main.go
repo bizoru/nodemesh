@@ -55,6 +55,13 @@ type NodeState struct {
 	Uptime    int64 `json:"uptime"`
 	Down      bool  `json:"down"`
 	LastAlert int64 `json:"last_alert"`
+	// MCL-199: ULTIMA memoria conocida del nodo, del ultimo /hb que trajo el
+	// dato (clientes viejos que aun no manden estos campos no lo pisan con
+	// cero: ver el guard en handleHB). Es lo que permite que la alerta del
+	// dead-man diga "asi estaba de memoria justo antes de callarse" en vez de
+	// solo "no contesta".
+	MemUsedMB  int64 `json:"mem_used_mb,omitempty"`
+	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
 }
 type State struct {
 	mu    sync.Mutex
@@ -109,6 +116,11 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	}
 	var up int64
 	fmt.Sscan(r.FormValue("uptime"), &up)
+	// MCL-199: memoria del emisor, si la manda (clientes viejos no la
+	// mandan; se guarda 0 y el guard de abajo la deja tal cual).
+	var memUsed, memTotal int64
+	fmt.Sscan(r.FormValue("mem_used_mb"), &memUsed)
+	fmt.Sscan(r.FormValue("mem_total_mb"), &memTotal)
 	now := time.Now().Unix()
 	state.mu.Lock()
 	ns := state.Nodes[node]
@@ -118,6 +130,11 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	}
 	wasDown := ns.Down
 	ns.LastSeen, ns.Uptime, ns.Down = now, up, false
+	// Solo se pisa si el latido trae memoria de verdad: un binario viejo sin
+	// estos campos no debe borrar el ultimo dato bueno que ya se tenia.
+	if memTotal > 0 {
+		ns.MemUsedMB, ns.MemTotalMB = memUsed, memTotal
+	}
 	state.mu.Unlock()
 	if wasDown {
 		telegram(fmt.Sprintf("✅ heartbeat: %s volvió a reportar (por internet).", node))
@@ -132,9 +149,21 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	out := map[string]any{}
 	for n, ns := range state.Nodes {
-		out[n] = map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime, "movil": esMovil(n)}
+		out[n] = map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime, "movil": esMovil(n), "mem_used_mb": ns.MemUsedMB, "mem_total_mb": ns.MemTotalMB}
 	}
 	json.NewEncoder(w).Encode(out)
+}
+
+// memInfoSuffix arma el trozo diagnostico del mensaje de dead-man a partir de
+// la ULTIMA memoria conocida del nodo (no hay otra: si el nodo no contesta al
+// latido, tampoco va a contestar a un /metrics en vivo). Vacio si nunca llego
+// memoria (cliente viejo, o nodo movil sin este campo) — MCL-199.
+func memInfoSuffix(ns *NodeState) string {
+	if ns.MemTotalMB <= 0 {
+		return ""
+	}
+	pct := 100 * ns.MemUsedMB / ns.MemTotalMB
+	return fmt.Sprintf(" Última memoria conocida: %d/%d MB (%d%%).", ns.MemUsedMB, ns.MemTotalMB, pct)
 }
 
 func deadManLoop() {
@@ -160,7 +189,9 @@ func deadManLoop() {
 			if silent > int64(cfg.DeadAfterSecs) {
 				if !ns.Down || now-ns.LastAlert >= realert {
 					mins := silent / 60
-					telegram(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).", node, mins))
+					// MCL-199: la memoria de justo antes de callarse, para que
+					// la alerta diagnostique en vez de solo constatar.
+					telegram(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s", node, mins, memInfoSuffix(ns)))
 					ns.Down = true
 					ns.LastAlert = now
 				}

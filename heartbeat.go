@@ -37,6 +37,17 @@ func sendHeartbeat(cfg *Config, client *http.Client) {
 	form.Set("node", cfg.Node)
 	form.Set("token", cfg.HeartbeatToken)
 	form.Set("uptime", fmt.Sprint(uptimeSeconds()))
+	// MCL-199 (postmortem OOM de entry, 2026-09-12): si el dead-man dispara,
+	// que el mensaje diga algo mas que "no contesta". localSpecs() es la
+	// MISMA Specs que ya viaja por gossip (cacheada 30s, cero coste extra);
+	// aqui va tambien por el latido porque el latido es el canal que
+	// sobrevive cuando el tailnet —y con el, el gossip— se cae. El colector
+	// guarda el ULTIMO valor recibido, asi que si el nodo se queda mudo, la
+	// alerta cuenta la memoria de justo antes de callarse, no un dato en
+	// vivo que por definicion no se puede pedir a un nodo que no contesta.
+	specs := localSpecs()
+	form.Set("mem_used_mb", fmt.Sprint(specs.MemUsedMB))
+	form.Set("mem_total_mb", fmt.Sprint(specs.MemTotalMB))
 	resp, err := client.PostForm(cfg.HeartbeatURL, form)
 	if err != nil {
 		// silencioso salvo debug: un latido perdido no es un error del nodo,
