@@ -10,9 +10,11 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -62,6 +64,11 @@ type NodeState struct {
 	// solo "no contesta".
 	MemUsedMB  int64 `json:"mem_used_mb,omitempty"`
 	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
+	// PublicIP: desde dónde salió el último latido. No lo manda el nodo —lo
+	// ve el colector—, así que es el único dato de aquí que el emisor no
+	// puede falsear sin cambiar de red de verdad. Sirve para ubicar al nodo
+	// por prefijo cuando su sistema le esconde el SSID.
+	PublicIP string `json:"public_ip,omitempty"`
 }
 type State struct {
 	mu    sync.Mutex
@@ -130,6 +137,7 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	}
 	wasDown := ns.Down
 	ns.LastSeen, ns.Uptime, ns.Down = now, up, false
+	ns.PublicIP = ipDeOrigen(r)
 	// Solo se pisa si el latido trae memoria de verdad: un binario viejo sin
 	// estos campos no debe borrar el ultimo dato bueno que ya se tenia.
 	if memTotal > 0 {
@@ -139,7 +147,33 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	if wasDown {
 		telegram(fmt.Sprintf("✅ heartbeat: %s volvió a reportar (por internet).", node))
 	}
-	fmt.Fprintln(w, "ok")
+	// Se responde con la IP desde la que llegó el latido. El nodo no tiene
+	// otra forma de saber su IP pública sin preguntarle a un tercero, y le
+	// hace falta para ubicarse cuando el sistema le esconde el SSID (macOS
+	// sin Localización) o la tabla ARP (Android). Aquí sale gratis: el
+	// paquete ya está entrando por internet plano.
+	fmt.Fprintln(w, "ok", ipDeOrigen(r))
+}
+
+// ipDeOrigen saca la IP real del emisor. Detrás del Funnel de Tailscale la
+// conexión llega de localhost, así que la buena es la de X-Forwarded-For; se
+// coge la PRIMERA de la lista, que es el cliente, y solo se acepta si es una
+// IP válida.
+func ipDeOrigen(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		primera := strings.TrimSpace(strings.Split(xff, ",")[0])
+		if net.ParseIP(primera) != nil {
+			return primera
+		}
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	if net.ParseIP(host) != nil {
+		return host
+	}
+	return ""
 }
 
 func handleStatus(w http.ResponseWriter, r *http.Request) {

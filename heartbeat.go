@@ -2,9 +2,11 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -54,8 +56,21 @@ func sendHeartbeat(cfg *Config, client *http.Client) {
 		// es justo lo que el colector detecta.
 		return
 	}
+	// El colector contesta con la IP desde la que nos vio salir. Es la única
+	// vía para conocer la IP pública propia SIN preguntarle a un servicio de
+	// fuera, y es lo que ubica a los nodos donde el sistema no deja leer el
+	// SSID (macOS sin Localización) ni la tabla ARP (Android). El latido ya
+	// cruzaba internet plano; esto no añade ni una petición.
+	//
+	// Un colector viejo responde "ok" a secas: fijaIPPublica lo descarta por
+	// no ser una IP, así que se puede desplegar en cualquier orden.
+	cuerpo, _ := io.ReadAll(io.LimitReader(resp.Body, 128))
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		log.Printf("heartbeat: %s respondió %d", cfg.HeartbeatURL, resp.StatusCode)
+		return
+	}
+	for _, campo := range strings.Fields(string(cuerpo)) {
+		fijaIPPublica(campo)
 	}
 }

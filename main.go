@@ -110,6 +110,15 @@ type Config struct {
 	// nodo caído que vuelve con el log viejo). Hoy lleva "bga-mbp-i9", la
 	// máquina de Bucaramanga que Steven borró del tailnet el 2026-09-09.
 	ForgetNodes []string `json:"forgetNodes,omitempty"`
+	// Placement: dónde está ESTE nodo. Cada uno declara solo lo suyo y el dato
+	// viaja por gossip, al revés que el mapa `locations` de abajo, que había
+	// que replicar en los trece ficheros —y por eso cuatro nodos llevaban
+	// meses saliendo con "?". Ver placement.go.
+	Placement *Placement `json:"placement,omitempty"`
+	// Sites: catálogo de sedes escrito a mano. Solo hace falta sembrar los
+	// SSID; el resto de la huella (MAC del router, prefijo público, subred) la
+	// levantan solos los nodos que ya saben dónde están.
+	Sites map[string]Site `json:"sites,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -772,6 +781,13 @@ type nodeInfo struct {
 	LANCheck     *LANCheck     `json:"lanCheck,omitempty"`     // only set by whichever node actually checked
 	BLECheck     *BLECheck     `json:"bleCheck,omitempty"`     // only set by whichever node actually checked
 	Specs        *Specs        `json:"specs,omitempty"`        // propios o aprendidos por gossip (ver specs.go)
+	// Placement: sitio ya resuelto y de dónde salió el dato. Se relaya como
+	// los specs (lleva UpdatedAt). Ver placement.go.
+	Placement *PlacementInfo `json:"placement,omitempty"`
+	// Gateway: MAC del router de ESTE nodo. Primera mano, nunca se relaya —
+	// no dice nada de un tercero. Se publica para poder diagnosticar por qué
+	// un nodo se ubicó donde se ubicó.
+	Gateway string `json:"gateway,omitempty"`
 }
 
 // Versiones de los pares, aprendidas en cada ronda de gossip al leer su
@@ -861,6 +877,7 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			// que un nodo conozca la flota entera aunque no llegue a todos.
 			if n != cfg.Node {
 				setPeerSpecs(n, info.Specs)
+				setPeerPlacement(n, info.Placement)
 				// Mismo trato para las observaciones directas, y por el mismo
 				// motivo: llevan timestamp, así que la copia rancia se
 				// descarta sola. Es lo que hace que el ping de LAN de un nodo a
@@ -868,6 +885,18 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 				setPeerChecks(n, peerNodeName(infos, ip), info.LANCheck, info.BLECheck)
 			}
 		}
+		// El catálogo de sedes y las huellas aprendidas viajan como todo lo
+		// demás: quien levantó una huella desde un sitio que conocía con
+		// certeza se la pasa al resto, y así un nodo que llega sin SSID puede
+		// ubicarse con lo que aprendieron otros.
+		var sedes struct {
+			Catalog map[string]Site   `json:"catalog"`
+			Learned []huellaAprendida `json:"learned"`
+		}
+		if err := getJSON(client, base+"/api/sites", &sedes); err == nil {
+			mezclaSitios(sedes.Catalog, sedes.Learned)
+		}
+
 		// pull chain extensions for every known node
 		for n := range known {
 			if n == cfg.Node {
@@ -947,9 +976,21 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 			info.Version = version
 			s := localSpecs()
 			info.Specs = &s
+			info.Placement = placementPropio()
+			info.Gateway = gatewayActual()
 		} else {
 			info.Version = getPeerVersion(n)
 			info.Specs = getPeerSpecs(n)
+			info.Placement = getPeerPlacement(n)
+		}
+		// `location` se sigue rellenando: el visor del R1 y meshflow leen ese
+		// campo, no el objeto nuevo. Sale del placement cuando lo hay y del
+		// mapa viejo cuando no, que es lo que hace que la migración pueda ser
+		// nodo a nodo en vez de un día de corte.
+		if info.Placement != nil {
+			if et := etiquetaSitio(*info.Placement); et != "" {
+				info.Location = et
+			}
 		}
 		out[n] = info
 	}
@@ -967,8 +1008,17 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 	return out
 }
 
+// configPath: dónde está el fichero que se reescribe al cambiar el placement
+// en caliente. Lo fija main(); vive aquí porque newMux no lo recibe y pasarlo
+// por toda la cadena solo para esto no compensa.
+var configPath string
+
 func newMux(cfg *Config, store *Store) *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/placement", func(w http.ResponseWriter, r *http.Request) {
+		handlePlacement(w, r, cfg, configPath)
+	})
+	mux.HandleFunc("/api/sites", handleSites)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1109,11 +1159,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	configPath = *cfgPath
 	store, err := openStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
 	specsDiskPath = cfg.DataDir // el disco que se reporta es donde escribimos
+	nodoLocal = cfg.Node
+	cargaSitios(cfg)
+	fijaDeclaracion(cfg.Placement)
 	log.Printf("nodemesh starting: node=%s port=%d peers=%v", cfg.Node, cfg.Port, cfg.Peers)
 
 	// collector loop
@@ -1121,6 +1175,15 @@ func main() {
 		heartbeat := int64(600)
 		for {
 			r := collect(cfg)
+			// El sitio se recalcula con lo que se acaba de medir, no con lo
+			// que se midió al arrancar: si alguien se lleva el portátil a la
+			// otra sede, la vuelta siguiente ya lo dice.
+			refrescaPropio(señales{
+				SSID:     r.SSID,
+				LocalIP:  r.LocalIP,
+				Gateway:  gatewayActual(),
+				PublicIP: ipPublicaActual(),
+			})
 			head, ok := store.Head(cfg.Node)
 			if !ok || !sameStatus(head, r) || r.TS-head.TS >= heartbeat {
 				r.Seq = 1
