@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -72,5 +73,83 @@ func TestMantenimientoSoloCallaAlNodoAnunciadoYCaduca(t *testing.T) {
 	state.Mantenimiento = nil
 	if enMantenimiento("entry") {
 		t.Error("sin mantenimientos declarados no debe callarse nada")
+	}
+}
+
+// El fallo de un canal se cuenta por el OTRO, se anuncia una vez, no se repite
+// antes de realertHours y la recuperacion SIEMPRE se avisa con cuanto duro.
+// Es el mismo criterio del resto de la flota ("si ya va mas de 10 horas ya se
+// que esta pasando, lo unico que me interesa es saber si regresa").
+func TestRevisarCanalAvisaUnaVezYAlVolver(t *testing.T) {
+	state.Canales = map[string]*EstadoCanal{}
+	cfg.RealertHours = 8
+	var dichos []string
+	decir := func(s string) { dichos = append(dichos, s) }
+	t0 := time.Now().Unix()
+
+	revisarCanal("telegram", true, "", t0, decir) // sano: calla
+	if len(dichos) != 0 {
+		t.Fatalf("un canal sano no debe decir nada, dijo %v", dichos)
+	}
+
+	revisarCanal("telegram", false, "no hay token configurado", t0+60, decir)
+	if len(dichos) != 1 || !strings.Contains(dichos[0], "NO puede avisar") {
+		t.Fatalf("deberia denunciar el canal roto, dijo %v", dichos)
+	}
+
+	revisarCanal("telegram", false, "no hay token configurado", t0+120, decir)
+	if len(dichos) != 1 {
+		t.Fatalf("no debe repetirse antes de realertHours, dijo %v", dichos)
+	}
+
+	// Pasadas las 8 h insiste una sola vez mas.
+	revisarCanal("telegram", false, "no hay token configurado", t0+60+8*3600, decir)
+	if len(dichos) != 2 || !strings.Contains(dichos[1], "sigue sin poder avisar") {
+		t.Fatalf("pasadas las 8h deberia insistir, dijo %v", dichos)
+	}
+
+	revisarCanal("telegram", true, "", t0+60+9*3600, decir)
+	if len(dichos) != 3 || !strings.Contains(dichos[2], "✅") || !strings.Contains(dichos[2], "min sin poder avisar") {
+		t.Fatalf("la recuperacion se avisa con la duracion, dijo %v", dichos)
+	}
+}
+
+// El caso que de verdad importa: un token vacio tiene que DETECTARSE, no
+// tragarse. Antes, telegram() volvia sin decir nada y el colector llevaba una
+// semana sin avisar de nada.
+func TestSaludTelegramCazaElTokenVacio(t *testing.T) {
+	cfg.TelegramToken, cfg.TelegramChat = "", "66513789"
+	ok, motivo := saludTelegram()
+	if ok || !strings.Contains(motivo, "telegramToken vacio") {
+		t.Errorf("un token vacio tiene que ser un canal roto, dio ok=%v motivo=%q", ok, motivo)
+	}
+}
+
+func TestURLSaludNotifySeDerivaDeLaDeEnvio(t *testing.T) {
+	cfg.NotifyURL = "http://127.0.0.1:8090/v1/messages"
+	if got := urlSaludNotify(); got != "http://127.0.0.1:8090/v1/health" {
+		t.Errorf("urlSaludNotify() = %q", got)
+	}
+	cfg.NotifyURL = ""
+	if got := urlSaludNotify(); got != "" {
+		t.Errorf("sin notifyURL no hay salud que consultar, dio %q", got)
+	}
+}
+
+// Un log no puede publicar el token. Go mete la URL entera en sus errores de
+// http, y la URL de Telegram lleva el token dentro.
+func TestSinTokenNoDejaEscaparElToken(t *testing.T) {
+	cfg.TelegramToken = "123456:ABCdefGHIjklMNO"
+	err := `Get "https://api.telegram.org/bot123456:ABCdefGHIjklMNO/getMe": context deadline exceeded`
+	got := sinToken(err)
+	if strings.Contains(got, cfg.TelegramToken) {
+		t.Fatalf("el token sigue en el texto: %q", got)
+	}
+	if !strings.Contains(got, "<token>") {
+		t.Errorf("deberia quedar la marca del token tapado: %q", got)
+	}
+	cfg.TelegramToken = ""
+	if got := sinToken("sin token no hay nada que tapar"); got != "sin token no hay nada que tapar" {
+		t.Errorf("sin token configurado no debe tocar el texto: %q", got)
 	}
 }

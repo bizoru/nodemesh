@@ -38,7 +38,10 @@ type Config struct {
 	NotifyURL     string   `json:"notifyURL"`     // ej "http://127.0.0.1:8090/v1/messages"
 	NotifyToken   string   `json:"notifyToken"`   // token del cliente "heartbeat"
 	NotifyTargets []string `json:"notifyTargets"` // ej ["r1","m5"]
-	Expect        []string `json:"expect"`        // nodos que SE esperan (alertar si nunca llegan)
+	// Cada cuanto se revisa que los canales de aviso SIGAN pudiendo avisar
+	// (ver canales.go). 0 = 300 s.
+	CanalesCadaSegs int      `json:"canalesCadaSegs,omitempty"`
+	Expect          []string `json:"expect"` // nodos que SE esperan (alertar si nunca llegan)
 	// Nodos MOVILES: se siguen (su last_seen sirve para diagnosticar) pero NUNCA
 	// alertan al irse ni al volver. Un portatil que se cierra, el R1 en el
 	// bolsillo o una tablet que se guarda no son incidentes: son lo normal.
@@ -84,6 +87,11 @@ type NodeState struct {
 type State struct {
 	mu    sync.Mutex
 	Nodes map[string]*NodeState `json:"nodes"`
+	// Canales: estado de cada via de aviso (ver canales.go). Se persiste con el
+	// resto del estado para que un reinicio del colector no borre que un canal
+	// llevaba roto: si se olvidara, la recuperacion pasaria muda y un canal
+	// roto volveria a anunciarse como nuevo en cada arranque.
+	Canales map[string]*EstadoCanal `json:"canales,omitempty"`
 	// Mantenimiento: nodo -> epoch hasta el que su silencio esta ANUNCIADO.
 	// Se guarda en el estado (no en la config) para que sobreviva a un
 	// reinicio del colector: una parada anunciada no puede volverse alerta
@@ -177,7 +185,9 @@ func telegram(text string) {
 	cl := &http.Client{Timeout: 15 * time.Second}
 	r, err := cl.PostForm("https://api.telegram.org/bot"+cfg.TelegramToken+"/sendMessage", form)
 	if err != nil {
-		log.Printf("Telegram: fallo el envio: %v", err)
+		// sinToken y no "%v" a secas: el error de http trae la URL, y la URL
+		// trae el token (ver canales.go).
+		log.Printf("Telegram: fallo el envio: %s", sinToken(err.Error()))
 		return
 	}
 	defer r.Body.Close()
@@ -328,6 +338,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		}
 		out[n] = fila
 	}
+	// Los nodos siguen colgando de la raiz, como siempre: cualquier script
+	// suelto que lea `.entry.last_seen_ago_s` no se entera del cambio. Lo
+	// nuevo va bajo una clave con guion bajo, que ningun nodo puede llamarse.
+	out["_canales"] = state.Canales
 	json.NewEncoder(w).Encode(out)
 }
 
@@ -406,7 +420,16 @@ func main() {
 		cfg.RealertHours = 8
 	}
 	loadState()
+	// Un aviso al arrancar de lo que YA esta roto: si el colector se levanta
+	// sin poder avisar, eso es lo primero que hay que saber.
+	if ok, motivo := saludTelegram(); !ok {
+		log.Printf("ARRANQUE: el canal telegram no puede avisar: %s", motivo)
+	}
+	if ok, motivo := saludNotify(); !ok {
+		log.Printf("ARRANQUE: el canal notify no puede avisar: %s", motivo)
+	}
 	go deadManLoop()
+	go vigilarCanales()
 	http.HandleFunc("/hb", handleHB)
 	// /ip devuelve la IP desde la que se ve al que pregunta, y nada más. Es
 	// para que un nodo sepa su IP pública sin depender de un servicio ajeno:

@@ -44,6 +44,30 @@ De ahí: umbral de 3 min (con los nodos latiendo cada 60 s), envío también por
 notify, y **todo fallo de envío se registra** — un vigilante que cree haber
 avisado y no avisó es peor que no tener vigilante.
 
+## Vigilancia de los CANALES (canales.go)
+La lección de fondo del 18-sep no fue el token: fue que **nadie vigilaba la
+capacidad de avisar**. Cada 5 min (`canalesCadaSegs`) el colector comprueba que
+sus dos vías siguen vivas, y **denuncia cada una por la otra**:
+
+- **telegram**: `getMe` contra la API real — valida el token **sin escribirle a
+  nadie**. Un token vacío, revocado o una API inalcanzable se ve en 5 minutos,
+  no en una semana. Si falla, se avisa **por los aparatos**.
+- **notify**: su `/v1/health` (derivado de `notifyURL`, para no configurar dos
+  veces lo mismo). `degraded` cuenta como roto y el mensaje nombra la pieza
+  (`mqtt=disconnected`), porque eso es lo que hace falta para arreglarlo. Si
+  falla, se avisa **por Telegram**.
+
+Mismo criterio de silencio que el resto de la flota: se avisa al romperse, no se
+repite antes de `realertHours`, y la recuperación **siempre** se avisa diciendo
+cuánto duró. El estado vive en `state.json` para que un reinicio no borre que
+algo llevaba roto. `/status` lo expone bajo `_canales` (los nodos siguen
+colgando de la raíz: no se rompe ningún script que ya lo lea).
+
+**OJO al registrar errores de Telegram**: Go mete la URL entera en sus
+`*url.Error`, y esa URL lleva el token. Todo lo que se registre pasa por
+`sinToken()` — se aprendió publicando el token en el journal en la primera
+prueba de este fichero.
+
 ### Pendiente, no implementado aquí (MCL-199, ver el postmortem)
 Memoria usada/total ya dice mucho ("iba al 92%" no es lo mismo que "llevaba
 2 min sin cortes de luz"), pero no dice QUIÉN se comió la RAM. Para eso
