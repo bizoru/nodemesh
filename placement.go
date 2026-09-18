@@ -456,6 +456,10 @@ func resuelve(decl Placement, s señales) PlacementInfo {
 		sitio, tipo, conf = porSSID(s.SSID), SourceSSID, ConfCertain
 	case porGateway(s.Gateway) != "":
 		sitio, tipo, conf = porGateway(s.Gateway), SourceGateway, ConfCertain
+	case primero(porVecino(s.LocalIP)) != "":
+		// Un ping que llega es una prueba física: esas dos máquinas comparten
+		// cable o router. Por eso va por delante del prefijo público.
+		sitio, tipo, conf = primero(porVecino(s.LocalIP)), SourcePeer, ConfCertain
 	case porPrefijo(s.PublicIP) != "":
 		sitio, tipo, conf = porPrefijo(s.PublicIP), SourcePublicIP, ConfHigh
 	case porSubred(s.LocalIP) != "":
@@ -801,4 +805,116 @@ func ipPublicaLoop(cfg *Config) {
 		}
 		time.Sleep(10 * time.Minute)
 	}
+}
+
+// ---------- el vecino de LAN ----------
+
+// vecino es un nodo de la flota del que se sabe su IP de LAN y dónde dice
+// estar.
+type vecino struct {
+	Nombre  string
+	LocalIP string
+	Sitio   string
+	Fuente  string
+}
+
+var vecindario = struct {
+	mu sync.RWMutex
+	v  []vecino
+}{}
+
+func fijaVecinos(v []vecino) {
+	vecindario.mu.Lock()
+	vecindario.v = v
+	vecindario.mu.Unlock()
+}
+
+// pingCache evita repetir el ping en cada vuelta del colector. En el R1 esto
+// corre con batería, y aquí la batería manda: un vecino no cambia de LAN entre
+// un minuto y el siguiente.
+var pingCache = struct {
+	mu sync.Mutex
+	m  map[string]struct {
+		ok bool
+		at time.Time
+	}
+}{m: map[string]struct {
+	ok bool
+	at time.Time
+}{}}
+
+const pingTTL = 5 * time.Minute
+
+func alcanzaLAN(ip string) bool {
+	pingCache.mu.Lock()
+	if e, ok := pingCache.m[ip]; ok && time.Since(e.at) < pingTTL {
+		pingCache.mu.Unlock()
+		return e.ok
+	}
+	pingCache.mu.Unlock()
+	ok := pingHost(ip)
+	pingCache.mu.Lock()
+	pingCache.m[ip] = struct {
+		ok bool
+		at time.Time
+	}{ok, time.Now()}
+	pingCache.mu.Unlock()
+	return ok
+}
+
+// primero se queda con el sitio y tira la cuenta de pings, que solo interesa
+// para no barrer la red.
+func primero(sitio string, _ int) string { return sitio }
+
+// porVecino ubica un nodo por la compañía que tiene en su LAN.
+//
+// Es la señal más fuerte que hay y la única que no depende de que el sistema
+// operativo deje leer nada: si alcanzo por LAN a una máquina que sabe con
+// certeza dónde está, estoy donde ella. Es lo que ubica al R1, al que Android
+// le esconde el SSID y la tabla ARP a la vez.
+//
+// Estar en la misma /24 NO basta y por eso se hace ping: 192.168.1.0/24 es la
+// LAN de Bucaramanga Y la de Starlink en Socorro, así que la subred sola deja
+// dos candidatos. El ping los separa, porque son dos redes físicas distintas
+// sin ruta entre ellas.
+//
+// Solo cuentan los vecinos que saben dónde están de PRIMERA mano. Aceptar a
+// uno que a su vez se ubicó por un vecino encadenaría deducciones, y dos nodos
+// podrían acabar confirmándose el sitio el uno al otro sin que ninguno lo
+// supiera — el mismo círculo que crossCheckedState ya evita con las caídas.
+func porVecino(miIP string) (string, int) {
+	if miIP == "" {
+		return "", 0
+	}
+	miSub := subredDe(miIP)
+	if miSub == "" {
+		return "", 0
+	}
+	vecindario.mu.RLock()
+	lista := append([]vecino(nil), vecindario.v...)
+	vecindario.mu.RUnlock()
+
+	cands := map[string]bool{}
+	pings := 0
+	for _, v := range lista {
+		if v.Sitio == "" || v.LocalIP == "" || v.LocalIP == miIP {
+			continue
+		}
+		if v.Fuente != SourceManual && v.Fuente != SourceSSID && v.Fuente != SourceGateway {
+			continue
+		}
+		if subredDe(v.LocalIP) != miSub {
+			continue
+		}
+		// Tope de pings por vuelta: en un aparato con batería esto no puede
+		// convertirse en un barrido de la red.
+		if pings >= 3 {
+			break
+		}
+		pings++
+		if alcanzaLAN(v.LocalIP) {
+			cands[v.Sitio] = true
+		}
+	}
+	return unico(cands), pings
 }

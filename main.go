@@ -1183,6 +1183,26 @@ func main() {
 		heartbeat := int64(600)
 		for {
 			r := collect(cfg)
+			// El vecindario, antes de resolver: quién hay en la flota, con
+			// qué IP de LAN y dónde dice estar. De ahí sale el ping que ubica
+			// a los nodos a los que el sistema no les deja leer nada.
+			vs := []vecino{}
+			for _, n := range store.Nodes() {
+				if n == cfg.Node || forgottenNodes[n] {
+					continue
+				}
+				head, ok := store.Head(n)
+				if !ok || head.LocalIP == "" {
+					continue
+				}
+				p := getPeerPlacement(n)
+				if p == nil {
+					continue
+				}
+				vs = append(vs, vecino{Nombre: n, LocalIP: head.LocalIP,
+					Sitio: p.Site, Fuente: p.Source})
+			}
+			fijaVecinos(vs)
 			// El sitio se recalcula con lo que se acaba de medir, no con lo
 			// que se midió al arrancar: si alguien se lleva el portátil a la
 			// otra sede, la vuelta siguiente ya lo dice.
