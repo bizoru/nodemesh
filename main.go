@@ -671,6 +671,15 @@ func pingHost(host string) bool {
 	default:
 		args = []string{"-n", "2", host}
 	}
+	// En Android NO se lanza nada. Poner la ruta absoluta no bastó: el
+	// proceso sigue muriendo con SIGSYS al ejecutar el ping de Termux
+	// —comprobado en el R1, crash-loop cada 40 s con el volcado de registros
+	// deletreando .../usr/bin/ping—. Aquí no hay medias tintas: en ese
+	// aparato, todo servicio de larga vida que quiera seguir vivo no
+	// ejecuta procesos.
+	if esAndroid() {
+		return false
+	}
 	bin := rutaPing()
 	if bin == "" {
 		return false
@@ -693,6 +702,26 @@ var pingCandidatos = []string{
 	"/data/data/com.termux/files/usr/bin/ping", // Termux
 	"/bin/ping", "/usr/bin/ping", "/sbin/ping", "/usr/sbin/ping",
 	`C:\Windows\System32\PING.EXE`,
+}
+
+// esAndroid distingue Android de un Linux normal, que para Go son el mismo
+// GOOS. Se mira un fichero del sistema, no una variable de entorno: nodemesh
+// arranca desde un supervisor sin sesión y el entorno allí no dice nada.
+var android = struct {
+	sync.Once
+	v bool
+}{}
+
+func esAndroid() bool {
+	android.Do(func() {
+		for _, c := range []string{"/system/bin/app_process", "/system/build.prop"} {
+			if _, err := os.Stat(c); err == nil {
+				android.v = true
+				return
+			}
+		}
+	})
+	return android.v
 }
 
 var pingBin = struct {
