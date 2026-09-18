@@ -255,6 +255,13 @@ func main() {
 	loadState()
 	go deadManLoop()
 	http.HandleFunc("/hb", handleHB)
+	// /ip devuelve la IP desde la que se ve al que pregunta, y nada más. Es
+	// para que un nodo sepa su IP pública sin depender de un servicio ajeno:
+	// esto ya es infraestructura propia y está publicada por Funnel. Sin
+	// token a propósito — no cuenta nada que el que pregunta no sepa ya.
+	http.HandleFunc("/ip", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, ipDeOrigen(r))
+	})
 	http.HandleFunc("/status", handleStatus)
 	log.Printf("heartbeat-collector escuchando en %s", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))

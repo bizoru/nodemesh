@@ -149,6 +149,24 @@ func normalizaSSID(s string) string {
 // Para normalizar MAC se reusa normMAC() de main.go, que ya extrae y rellena
 // a dos dígitos los octetos que macOS imprime sin el cero ("8:f6:6:...").
 
+// esGlobal descarta todo lo que no es una IP de internet.
+//
+// Es imprescindible, y no un adorno: el latido a gcp-east va por MagicDNS
+// mientras el tailnet esté sano, así que la IP que ve el colector suele ser la
+// **100.x del tailnet**, no la de salida. Aprender eso como huella sería
+// catastrófico — la 100.64.0.0/10 la comparten los trece nodos, así que
+// "ubicaría" a toda la flota en la misma sede.
+func esGlobal(ip net.IP) bool {
+	if ip == nil || ip.IsLoopback() || ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return false
+	}
+	// CGNAT: 100.64.0.0/10. Es el rango de Tailscale y también el que usan
+	// algunos operadores móviles, y en los dos casos no identifica una sede.
+	_, cgnat, _ := net.ParseCIDR("100.64.0.0/10")
+	return !cgnat.Contains(ip)
+}
+
 // prefijoDe reduce una IP pública a su red, que es lo estable. La IP exacta no
 // vale: cambia al reiniciar el router. Se usa /24 en IPv4 y /48 en IPv6, que es
 // lo que suele conservar un mismo abonado.
@@ -163,7 +181,8 @@ func prefijoDe(ip string) string {
 	return (&net.IPNet{IP: p.Mask(net.CIDRMask(48, 128)), Mask: net.CIDRMask(48, 128)}).String()
 }
 
-// subredDe reduce la IP local a su /24.
+// subredDe reduce la IP local a su /24. A diferencia del prefijo público, aquí
+// lo normal es una dirección privada: es justo lo que se quiere comparar.
 func subredDe(ip string) string { return prefijoDe(ip) }
 
 // ---------- carga ----------
@@ -479,7 +498,7 @@ func aprendeDesde(sitio, region string, s señales) {
 		aprende(huellaAprendida{Site: sitio, Region: region, Gateway: mac, SSID: s.SSID,
 			By: nodoLocal, UpdatedAt: ahora})
 	}
-	if p := prefijoDe(s.PublicIP); p != "" {
+	if p := prefijoDe(s.PublicIP); p != "" && esGlobal(net.ParseIP(s.PublicIP)) {
 		aprende(huellaAprendida{Site: sitio, Region: region, Prefix: p, SSID: s.SSID,
 			By: nodoLocal, UpdatedAt: ahora})
 	}
@@ -523,7 +542,7 @@ var ipPublica = struct {
 }{}
 
 func fijaIPPublica(ip string) {
-	if net.ParseIP(strings.TrimSpace(ip)) == nil {
+	if !esGlobal(net.ParseIP(strings.TrimSpace(ip))) {
 		return
 	}
 	ipPublica.mu.Lock()
@@ -754,5 +773,32 @@ func mezclaSitios(cat map[string]Site, aprendidas []huellaAprendida) {
 	sitios.mu.Unlock()
 	for _, h := range aprendidas {
 		aprende(h)
+	}
+}
+
+// ipPublicaLoop pregunta cada tanto por dónde sale este nodo.
+//
+// Va contra el /ip del colector propio, no contra un servicio de terceros: es
+// el mismo aparato que ya recibe los latidos, así que no se añade ninguna
+// dependencia externa ni se le cuenta a nadie de fuera que esta flota existe.
+//
+// Cadencia baja a propósito: la IP de salida cambia cuando alguien se lleva el
+// portátil o se reinicia el router, no cada minuto, y el nodo puede estar con
+// batería.
+func ipPublicaLoop(cfg *Config) {
+	if cfg.PublicIPURL == "" {
+		return
+	}
+	cliente := &http.Client{Timeout: 15 * time.Second}
+	for {
+		if resp, err := cliente.Get(cfg.PublicIPURL); err == nil {
+			cuerpo := make([]byte, 64)
+			n, _ := resp.Body.Read(cuerpo)
+			resp.Body.Close()
+			for _, campo := range strings.Fields(string(cuerpo[:n])) {
+				fijaIPPublica(campo)
+			}
+		}
+		time.Sleep(10 * time.Minute)
 	}
 }

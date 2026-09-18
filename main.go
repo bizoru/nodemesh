@@ -102,6 +102,14 @@ type Config struct {
 	HeartbeatURL   string `json:"heartbeatURL,omitempty"`
 	HeartbeatToken string `json:"heartbeatToken,omitempty"`
 	HeartbeatSecs  int    `json:"heartbeatSecs,omitempty"`
+	// PublicIPURL: endpoint que devuelve la IP desde la que nos ve
+	// (el /ip del colector). Vacío = no se consulta.
+	//
+	// Hace falta aparte del latido porque el latido va por MagicDNS mientras
+	// el tailnet esté sano, y entonces el colector nos ve con la 100.x del
+	// tailnet, que no ubica nada. Solo se pone en los nodos donde la
+	// ubicación por SSID o por router no llega — hoy, el R1.
+	PublicIPURL string `json:"publicIPURL,omitempty"`
 	// ForgetNodes: nombres de nodos DADOS DE BAJA. nodemesh los ignora aunque un
 	// peer se los ofrezca por gossip, no los muestra en /api/nodes, y borra su log
 	// al arrancar. Necesario porque el gossip re-descubre nodos de los peers, así
@@ -1215,6 +1223,9 @@ func main() {
 	go bleWatchLoop(cfg)
 	// heartbeat push a endpoint público (solo si HeartbeatURL está puesto)
 	go heartbeatLoop(cfg)
+	// IP pública propia (solo si PublicIPURL está puesto): es lo que ubica a
+	// los nodos a los que el sistema les esconde el SSID y la tabla ARP.
+	go ipPublicaLoop(cfg)
 
 	mux := newMux(cfg, store)
 	go serveOn("127.0.0.1:"+fmt.Sprint(cfg.Port), mux)
