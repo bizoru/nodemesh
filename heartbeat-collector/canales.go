@@ -31,6 +31,28 @@ type EstadoCanal struct {
 	Motivo      string `json:"motivo,omitempty"`
 	Desde       int64  `json:"desde,omitempty"`        // epoch del ultimo cambio de estado
 	UltimoAviso int64  `json:"ultimo_aviso,omitempty"` // para no repetir antes de realert
+	Fallos      int    `json:"fallos,omitempty"`       // sondeos malos seguidos, ver Salud.Firme
+}
+
+// Salud es el resultado de UNA comprobacion de un canal.
+//
+// Firme separa las dos maneras de estar roto, que no se parecen en nada:
+//
+//   - Firme: el token esta vacio o revocado, el chat no existe, notify contesta
+//     "degraded". Eso no se arregla solo, asi que se denuncia en el primer
+//     sondeo — que es justo para lo que se puso esta vigilancia.
+//   - Pasajero: la API no contesto a tiempo. gcp-east sale SOLO por IPv6 y a
+//     api.telegram.org le da hipo: el 2026-09-18 hubo cuatro baches de un unico
+//     sondeo, y cada uno solto su "🔴 no puede avisar" y, cinco minutos despues,
+//     su "✅ vuelve a funcionar". Ocho mensajes que no decian nada de nada, y en
+//     la pantalla del R1 veinte minutos de cola que retrasaron seis el aviso de
+//     que Abby habia salido de clase. Un vigilante que cuenta baches de red no
+//     esta vigilando: esta haciendo ruido. Para estos hacen falta
+//     [fallosSeguidosParaAvisar] sondeos malos SEGUIDOS.
+type Salud struct {
+	OK     bool
+	Motivo string
+	Firme  bool
 }
 
 // sinToken quita el token de cualquier texto antes de registrarlo. Go mete la
@@ -48,17 +70,18 @@ func sinToken(s string) string {
 // token contra la API real y no le escribe a nadie. Es la comprobacion que le
 // faltaba al colector — con ella, un token vacio o revocado se nota en 5
 // minutos en vez de en una semana.
-func saludTelegram() (bool, string) {
+func saludTelegram() Salud {
 	if cfg.TelegramToken == "" {
-		return false, "no hay token configurado (telegramToken vacio)"
+		return Salud{Motivo: "no hay token configurado (telegramToken vacio)", Firme: true}
 	}
 	if cfg.TelegramChat == "" {
-		return false, "no hay chat configurado (telegramChat vacio)"
+		return Salud{Motivo: "no hay chat configurado (telegramChat vacio)", Firme: true}
 	}
 	cl := &http.Client{Timeout: 15 * time.Second}
 	r, err := cl.Get("https://api.telegram.org/bot" + cfg.TelegramToken + "/getMe")
 	if err != nil {
-		return false, sinToken(fmt.Sprintf("no se alcanza la API: %v", err))
+		// Un timeout o un DNS que no resuelve es un bache hasta que se repita.
+		return Salud{Motivo: sinToken(fmt.Sprintf("no se alcanza la API: %v", err))}
 	}
 	defer r.Body.Close()
 	cuerpo, _ := io.ReadAll(io.LimitReader(r.Body, 500))
@@ -72,24 +95,30 @@ func saludTelegram() (bool, string) {
 		if motivo == "" {
 			motivo = fmt.Sprintf("respondio %d", r.StatusCode)
 		}
-		return false, motivo
+		// Que la API conteste y diga que no, es firme: el token o el chat
+		// estan mal y manana seguiran estandolo. Un 429 o un 5xx son suyos,
+		// se le pasan solos, y entran por la puerta de los baches.
+		firme := r.StatusCode < 500 && r.StatusCode != http.StatusTooManyRequests
+		return Salud{Motivo: motivo, Firme: firme}
 	}
-	return true, ""
+	return Salud{OK: true}
 }
 
 // saludNotify pregunta al servicio notify por su propia salud. "degraded"
 // cuenta como fallo: el 2026-09-12 el transporte MQTT quedo sin poder
 // autenticarse y los M5 dejaron de recibir sin que nadie se enterara — el
 // servicio respondia, pero a medias.
-func saludNotify() (bool, string) {
+func saludNotify() Salud {
 	url := urlSaludNotify()
 	if url == "" {
-		return false, "no hay notifyURL configurada"
+		return Salud{Motivo: "no hay notifyURL configurada", Firme: true}
 	}
 	cl := &http.Client{Timeout: 15 * time.Second}
 	r, err := cl.Get(url)
 	if err != nil {
-		return false, fmt.Sprintf("no responde: %v", err)
+		// Puede ser un redespliegue de notify en marcha; se confirma antes de
+		// contarlo.
+		return Salud{Motivo: fmt.Sprintf("no responde: %v", err)}
 	}
 	defer r.Body.Close()
 	cuerpo, _ := io.ReadAll(io.LimitReader(r.Body, 500))
@@ -97,7 +126,7 @@ func saludNotify() (bool, string) {
 	_ = json.Unmarshal(cuerpo, &d)
 	estado := d["status"]
 	if r.StatusCode == http.StatusOK && estado == "ok" {
-		return true, ""
+		return Salud{OK: true}
 	}
 	// Se nombra la pieza rota (mqtt/nats), que es lo que hace falta para
 	// arreglarlo sin ponerse a investigar desde cero.
@@ -114,7 +143,8 @@ func saludNotify() (bool, string) {
 	if len(rotas) > 0 {
 		motivo += " (" + strings.Join(rotas, ", ") + ")"
 	}
-	return false, motivo
+	// Contesto y dijo que esta mal: eso es una averia, no un bache.
+	return Salud{Motivo: motivo, Firme: true}
 }
 
 // urlSaludNotify deriva /v1/health de la URL de envio, para no tener que
@@ -130,7 +160,12 @@ func urlSaludNotify() string {
 // romperse, NO repite antes de realertHours, y SIEMPRE avisa al recuperarse
 // diciendo cuanto duro. `avisarPor` es el canal por el que se cuenta — nunca el
 // que esta roto.
-func revisarCanal(nombre string, ok bool, motivo string, ahora int64, avisarPor func(string)) {
+//
+// Con una salvedad, desde el 2026-09-18: un fallo PASAJERO (ver [Salud]) no
+// rompe el canal hasta repetirse [fallosSeguidosParaAvisar] sondeos seguidos.
+// Mientras tanto no se marca roto, y por eso tampoco habra despues un "vuelve
+// a funcionar" que contar: un bache de red no genera ni un mensaje.
+func revisarCanal(nombre string, s Salud, ahora int64, avisarPor func(string)) {
 	if state.Canales == nil {
 		state.Canales = map[string]*EstadoCanal{}
 	}
@@ -140,7 +175,8 @@ func revisarCanal(nombre string, ok bool, motivo string, ahora int64, avisarPor 
 		state.Canales[nombre] = est
 	}
 	realert := int64(cfg.RealertHours) * 3600
-	if ok {
+	if s.OK {
+		est.Fallos = 0
 		if !est.OK {
 			mins := (ahora - est.Desde) / 60
 			avisarPor(fmt.Sprintf("✅ canal %s: vuelve a funcionar (estuvo %d min sin poder avisar).", nombre, mins))
@@ -148,17 +184,30 @@ func revisarCanal(nombre string, ok bool, motivo string, ahora int64, avisarPor 
 		}
 		return
 	}
+	est.Fallos++
 	if est.OK {
-		est.OK, est.Desde, est.Motivo = false, ahora, motivo
+		if !s.Firme && est.Fallos < fallosSeguidosParaAvisar() {
+			// Queda en el journal y en /status: no se pierde, simplemente no
+			// se le despierta a nadie por un bache.
+			log.Printf("canal %s: sondeo malo %d/%d (%s), todavia no lo denuncio",
+				nombre, est.Fallos, fallosSeguidosParaAvisar(), s.Motivo)
+			est.Motivo = s.Motivo
+			return
+		}
+		est.OK, est.Desde, est.Motivo = false, ahora, s.Motivo
 		est.UltimoAviso = ahora
-		avisarPor(fmt.Sprintf("🔴 canal %s NO puede avisar: %s. Las alertas que salgan por ahi se estan perdiendo.", nombre, motivo))
+		aguante := ""
+		if !s.Firme {
+			aguante = fmt.Sprintf(" (%d sondeos seguidos)", est.Fallos)
+		}
+		avisarPor(fmt.Sprintf("🔴 canal %s NO puede avisar%s: %s. Las alertas que salgan por ahi se estan perdiendo.", nombre, aguante, s.Motivo))
 		return
 	}
-	est.Motivo = motivo
+	est.Motivo = s.Motivo
 	if ahora-est.UltimoAviso >= realert {
 		mins := (ahora - est.Desde) / 60
 		est.UltimoAviso = ahora
-		avisarPor(fmt.Sprintf("🔴 canal %s sigue sin poder avisar (%d min): %s.", nombre, mins, motivo))
+		avisarPor(fmt.Sprintf("🔴 canal %s sigue sin poder avisar (%d min): %s.", nombre, mins, s.Motivo))
 	}
 }
 
@@ -168,13 +217,13 @@ func vigilarCanales() {
 	for {
 		ahora := time.Now().Unix()
 
-		okTG, motivoTG := saludTelegram()
-		okNot, motivoNot := saludNotify()
+		saludTG := saludTelegram()
+		saludNot := saludNotify()
 
 		state.mu.Lock()
 		// Telegram roto -> se cuenta por los aparatos.
-		revisarCanal("telegram", okTG, motivoTG, ahora, func(texto string) {
-			if !okNot {
+		revisarCanal("telegram", saludTG, ahora, func(texto string) {
+			if !saludNot.OK {
 				log.Printf("canal telegram roto y notify tambien: %s", texto)
 				return
 			}
@@ -183,8 +232,8 @@ func vigilarCanales() {
 			}
 		})
 		// notify roto -> se cuenta por Telegram.
-		revisarCanal("notify", okNot, motivoNot, ahora, func(texto string) {
-			if !okTG {
+		revisarCanal("notify", saludNot, ahora, func(texto string) {
+			if !saludTG.OK {
 				log.Printf("canal notify roto y telegram tambien: %s", texto)
 				return
 			}
@@ -195,6 +244,18 @@ func vigilarCanales() {
 
 		time.Sleep(time.Duration(canalesCadaSegs()) * time.Second)
 	}
+}
+
+// fallosSeguidosParaAvisar: cuantos sondeos malos seguidos hacen falta para
+// dar un canal por roto cuando el fallo no es firme. Con el sondeo de 5 min
+// por defecto, tres son un cuarto de hora sin poder avisar — lo bastante corto
+// para enterarse de una averia de verdad y lo bastante largo para que los
+// baches de IPv6 de gcp-east no se oigan.
+func fallosSeguidosParaAvisar() int {
+	if cfg.CanalesFallosSeguidos > 0 {
+		return cfg.CanalesFallosSeguidos
+	}
+	return 3
 }
 
 func canalesCadaSegs() int {

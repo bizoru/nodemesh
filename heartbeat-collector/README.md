@@ -59,7 +59,30 @@ sus dos vías siguen vivas, y **denuncia cada una por la otra**:
 
 Mismo criterio de silencio que el resto de la flota: se avisa al romperse, no se
 repite antes de `realertHours`, y la recuperación **siempre** se avisa diciendo
-cuánto duró. El estado vive en `state.json` para que un reinicio no borre que
+cuánto duró.
+
+### Un bache de red no es una avería (2026-09-18, tarde)
+El mismo día que se montó esto, la vigilancia de canales soltó **ocho mensajes
+por nada**: cuatro veces `getMe` tardó más de 15 s, y cada una generó su "🔴 no
+puede avisar" y, cinco minutos después, su "✅ vuelve a funcionar". gcp-east sale
+**solo por IPv6** y a `api.telegram.org` le da hipo; no había ninguna avería que
+contar. Y no fue gratis: esos ocho avisos llenaron la cola de la pantalla del R1
+y retrasaron seis minutos el aviso de que Abby había salido de clase.
+
+Ahora cada comprobación devuelve además si el fallo es **firme**:
+
+- **Firme** (token vacío o revocado, chat que no existe, un 4xx de la API, notify
+  contestando `degraded`): se denuncia en el **primer** sondeo. Eso no se
+  arregla solo, y cazarlo rápido es justo para lo que se puso esta vigilancia.
+- **Pasajero** (timeout, DNS, 5xx, 429): hacen falta **3 sondeos malos
+  seguidos** (`canalesFallosSeguidos`, 15 min con el sondeo por defecto) para
+  darlo por roto. Mientras tanto queda en el journal y en `/status` — no se
+  pierde, simplemente no se despierta a nadie por un bache. Y como no llega a
+  marcarse roto, tampoco hay después un "vuelve a funcionar" que contar: un
+  bache **no genera ni un mensaje**.
+
+Un vigilante que cuenta baches de red no está vigilando: está haciendo ruido, y
+el ruido tapa justo lo que sí importaba. El estado vive en `state.json` para que un reinicio no borre que
 algo llevaba roto. `/status` lo expone bajo `_canales` (los nodos siguen
 colgando de la raíz: no se rompe ningún script que ya lo lea).
 

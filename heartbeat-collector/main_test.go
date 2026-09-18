@@ -87,28 +87,29 @@ func TestRevisarCanalAvisaUnaVezYAlVolver(t *testing.T) {
 	decir := func(s string) { dichos = append(dichos, s) }
 	t0 := time.Now().Unix()
 
-	revisarCanal("telegram", true, "", t0, decir) // sano: calla
+	revisarCanal("telegram", Salud{OK: true}, t0, decir) // sano: calla
 	if len(dichos) != 0 {
 		t.Fatalf("un canal sano no debe decir nada, dijo %v", dichos)
 	}
 
-	revisarCanal("telegram", false, "no hay token configurado", t0+60, decir)
+	roto := Salud{Motivo: "no hay token configurado", Firme: true}
+	revisarCanal("telegram", roto, t0+60, decir)
 	if len(dichos) != 1 || !strings.Contains(dichos[0], "NO puede avisar") {
 		t.Fatalf("deberia denunciar el canal roto, dijo %v", dichos)
 	}
 
-	revisarCanal("telegram", false, "no hay token configurado", t0+120, decir)
+	revisarCanal("telegram", roto, t0+120, decir)
 	if len(dichos) != 1 {
 		t.Fatalf("no debe repetirse antes de realertHours, dijo %v", dichos)
 	}
 
 	// Pasadas las 8 h insiste una sola vez mas.
-	revisarCanal("telegram", false, "no hay token configurado", t0+60+8*3600, decir)
+	revisarCanal("telegram", roto, t0+60+8*3600, decir)
 	if len(dichos) != 2 || !strings.Contains(dichos[1], "sigue sin poder avisar") {
 		t.Fatalf("pasadas las 8h deberia insistir, dijo %v", dichos)
 	}
 
-	revisarCanal("telegram", true, "", t0+60+9*3600, decir)
+	revisarCanal("telegram", Salud{OK: true}, t0+60+9*3600, decir)
 	if len(dichos) != 3 || !strings.Contains(dichos[2], "✅") || !strings.Contains(dichos[2], "min sin poder avisar") {
 		t.Fatalf("la recuperacion se avisa con la duracion, dijo %v", dichos)
 	}
@@ -119,9 +120,78 @@ func TestRevisarCanalAvisaUnaVezYAlVolver(t *testing.T) {
 // semana sin avisar de nada.
 func TestSaludTelegramCazaElTokenVacio(t *testing.T) {
 	cfg.TelegramToken, cfg.TelegramChat = "", "66513789"
-	ok, motivo := saludTelegram()
-	if ok || !strings.Contains(motivo, "telegramToken vacio") {
-		t.Errorf("un token vacio tiene que ser un canal roto, dio ok=%v motivo=%q", ok, motivo)
+	s := saludTelegram()
+	if s.OK || !strings.Contains(s.Motivo, "telegramToken vacio") {
+		t.Errorf("un token vacio tiene que ser un canal roto, dio ok=%v motivo=%q", s.OK, s.Motivo)
+	}
+	if !s.Firme {
+		t.Error("un token vacio no es un bache de red: tiene que denunciarse al primer sondeo")
+	}
+}
+
+// El ruido del 2026-09-18: cuatro baches de UN solo sondeo, cada uno con su
+// "🔴 no puede avisar" y su "✅ vuelve a funcionar" cinco minutos despues. Ocho
+// mensajes por nada, y la cola del R1 tapada veinte minutos.
+func TestUnBacheDeRedNoSueltaNiUnMensaje(t *testing.T) {
+	state.Canales = map[string]*EstadoCanal{}
+	cfg.RealertHours = 8
+	cfg.CanalesFallosSeguidos = 0 // el de por defecto: 3
+	var dichos []string
+	decir := func(s string) { dichos = append(dichos, s) }
+	t0 := time.Now().Unix()
+
+	bache := Salud{Motivo: "no se alcanza la API: context deadline exceeded"}
+	revisarCanal("telegram", bache, t0, decir)
+	revisarCanal("telegram", Salud{OK: true}, t0+300, decir)
+	revisarCanal("telegram", bache, t0+1800, decir)
+	revisarCanal("telegram", Salud{OK: true}, t0+2100, decir)
+
+	if len(dichos) != 0 {
+		t.Fatalf("un bache suelto no puede generar mensajes, solto %v", dichos)
+	}
+	if est := state.Canales["telegram"]; est == nil || !est.OK || est.Fallos != 0 {
+		t.Fatalf("el canal deberia seguir sano y sin fallos acumulados: %+v", est)
+	}
+}
+
+// Y lo contrario: una averia de verdad SI tiene que salir, solo que a los tres
+// sondeos en vez de al primero.
+func TestTresSondeosMalosSeguidosSiDenuncian(t *testing.T) {
+	state.Canales = map[string]*EstadoCanal{}
+	cfg.RealertHours = 8
+	cfg.CanalesFallosSeguidos = 0
+	var dichos []string
+	decir := func(s string) { dichos = append(dichos, s) }
+	t0 := time.Now().Unix()
+
+	bache := Salud{Motivo: "no se alcanza la API: context deadline exceeded"}
+	revisarCanal("telegram", bache, t0, decir)
+	revisarCanal("telegram", bache, t0+300, decir)
+	if len(dichos) != 0 {
+		t.Fatalf("con dos todavia no, solto %v", dichos)
+	}
+	revisarCanal("telegram", bache, t0+600, decir)
+	if len(dichos) != 1 || !strings.Contains(dichos[0], "3 sondeos seguidos") {
+		t.Fatalf("al tercero deberia denunciarlo diciendo cuantos van, dijo %v", dichos)
+	}
+
+	// Y al volver, la recuperacion de siempre.
+	revisarCanal("telegram", Salud{OK: true}, t0+900, decir)
+	if len(dichos) != 2 || !strings.Contains(dichos[1], "✅") {
+		t.Fatalf("la recuperacion se avisa, dijo %v", dichos)
+	}
+}
+
+// Un 401 no es un bache: la API contesto y dijo que el token no vale.
+func TestElFallo401SeDenunciaAlPrimerSondeo(t *testing.T) {
+	state.Canales = map[string]*EstadoCanal{}
+	cfg.RealertHours = 8
+	var dichos []string
+	decir := func(s string) { dichos = append(dichos, s) }
+
+	revisarCanal("telegram", Salud{Motivo: "Unauthorized", Firme: true}, time.Now().Unix(), decir)
+	if len(dichos) != 1 || strings.Contains(dichos[0], "sondeos seguidos") {
+		t.Fatalf("un fallo firme sale ya y sin contar sondeos, dijo %v", dichos)
 	}
 }
 

@@ -40,8 +40,11 @@ type Config struct {
 	NotifyTargets []string `json:"notifyTargets"` // ej ["r1","m5"]
 	// Cada cuanto se revisa que los canales de aviso SIGAN pudiendo avisar
 	// (ver canales.go). 0 = 300 s.
-	CanalesCadaSegs int      `json:"canalesCadaSegs,omitempty"`
-	Expect          []string `json:"expect"` // nodos que SE esperan (alertar si nunca llegan)
+	CanalesCadaSegs int `json:"canalesCadaSegs,omitempty"`
+	// Sondeos malos SEGUIDOS antes de dar un canal por roto cuando el fallo no
+	// es firme (ver Salud en canales.go). 0 = 3.
+	CanalesFallosSeguidos int      `json:"canalesFallosSeguidos,omitempty"`
+	Expect                []string `json:"expect"` // nodos que SE esperan (alertar si nunca llegan)
 	// Nodos MOVILES: se siguen (su last_seen sirve para diagnosticar) pero NUNCA
 	// alertan al irse ni al volver. Un portatil que se cierra, el R1 en el
 	// bolsillo o una tablet que se guarda no son incidentes: son lo normal.
@@ -422,11 +425,11 @@ func main() {
 	loadState()
 	// Un aviso al arrancar de lo que YA esta roto: si el colector se levanta
 	// sin poder avisar, eso es lo primero que hay que saber.
-	if ok, motivo := saludTelegram(); !ok {
-		log.Printf("ARRANQUE: el canal telegram no puede avisar: %s", motivo)
+	if s := saludTelegram(); !s.OK {
+		log.Printf("ARRANQUE: el canal telegram no puede avisar: %s", s.Motivo)
 	}
-	if ok, motivo := saludNotify(); !ok {
-		log.Printf("ARRANQUE: el canal notify no puede avisar: %s", motivo)
+	if s := saludNotify(); !s.OK {
+		log.Printf("ARRANQUE: el canal notify no puede avisar: %s", s.Motivo)
 	}
 	go deadManLoop()
 	go vigilarCanales()
