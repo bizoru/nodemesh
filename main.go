@@ -671,9 +671,47 @@ func pingHost(host string) bool {
 	default:
 		args = []string{"-n", "2", host}
 	}
+	bin := rutaPing()
+	if bin == "" {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "ping", args...).Run() == nil
+	return exec.CommandContext(ctx, bin, args...).Run() == nil
+}
+
+// rutaPing busca el binario por rutas absolutas en vez de dejar que exec lo
+// resuelva por PATH.
+//
+// No es manía: LookPath usa faccessat2, syscall que el seccomp de Android
+// BLOQUEA, y el proceso muere entero con SIGSYS —incapturable— para que el
+// supervisor lo reviva y vuelva a morir a la siguiente vuelta. El sitio donde
+// esto iba a doler es justo el nuevo: el R1 ubicándose por ping al vecino de
+// LAN. os.Stat sí está permitido.
+var pingCandidatos = []string{
+	"/system/bin/ping",                         // Android
+	"/data/data/com.termux/files/usr/bin/ping", // Termux
+	"/bin/ping", "/usr/bin/ping", "/sbin/ping", "/usr/sbin/ping",
+	`C:\Windows\System32\PING.EXE`,
+}
+
+var pingBin = struct {
+	sync.Once
+	v string
+}{}
+
+func rutaPing() string {
+	pingBin.Do(func() {
+		for _, c := range pingCandidatos {
+			if st, err := os.Stat(c); err == nil && !st.IsDir() {
+				pingBin.v = c
+				return
+			}
+		}
+		// Ningún candidato: se deja vacío y pingHost devuelve false. Mejor
+		// perder la señal que arriesgarse a un PATH que mata el proceso.
+	})
+	return pingBin.v
 }
 
 // lanPeerLoop pings cfg.LANPeer on the same cadence as the collector, so a
