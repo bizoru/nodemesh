@@ -25,7 +25,11 @@ func heartbeatLoop(cfg *Config) {
 	}
 	interval := cfg.HeartbeatSecs
 	if interval == 0 {
-		interval = 150 // 2.5 min por defecto
+		// 60 s. Antes 150, y con el umbral del colector en 3 min eso dejaba
+		// margen para UN solo latido perdido: un latido que se retrasa se
+		// volvia una alerta falsa. A 60 s hacen falta tres latidos perdidos
+		// seguidos para alertar, que ya es una caida de verdad.
+		interval = 60
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	for {

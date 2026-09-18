@@ -6,9 +6,11 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -20,14 +22,23 @@ import (
 )
 
 type Config struct {
-	Listen        string   `json:"listen"`    // ej "127.0.0.1:9099" (Funnel apunta aquí)
-	Token         string   `json:"token"`     // compartido con los nodos
-	StatePath     string   `json:"statePath"` // ej "/var/lib/heartbeat/state.json"
-	TelegramToken string   `json:"telegramToken"`
-	TelegramChat  string   `json:"telegramChat"`
-	DeadAfterSecs int      `json:"deadAfterSecs"` // silencio máximo antes de alertar
-	RealertHours  int      `json:"realertHours"`
-	Expect        []string `json:"expect"` // nodos que SE esperan (alertar si nunca llegan)
+	Listen        string `json:"listen"`    // ej "127.0.0.1:9099" (Funnel apunta aquí)
+	Token         string `json:"token"`     // compartido con los nodos
+	StatePath     string `json:"statePath"` // ej "/var/lib/heartbeat/state.json"
+	TelegramToken string `json:"telegramToken"`
+	TelegramChat  string `json:"telegramChat"`
+	DeadAfterSecs int    `json:"deadAfterSecs"` // silencio máximo antes de alertar
+	RealertHours  int    `json:"realertHours"`
+	// Notify: segunda via de aviso, a los aparatos (el R1 y los M5). El
+	// servicio notify corre en ESTA MISMA maquina, asi que este camino no
+	// pasa por entry ni por el cluster: sigue vivo justo cuando entry —lo
+	// que mas hay que vigilar— esta muerta. Telegram es la via principal;
+	// esta es la que suena en el bolsillo. Las dos son independientes: si
+	// una falla, la otra sigue.
+	NotifyURL     string   `json:"notifyURL"`     // ej "http://127.0.0.1:8090/v1/messages"
+	NotifyToken   string   `json:"notifyToken"`   // token del cliente "heartbeat"
+	NotifyTargets []string `json:"notifyTargets"` // ej ["r1","m5"]
+	Expect        []string `json:"expect"`        // nodos que SE esperan (alertar si nunca llegan)
 	// Nodos MOVILES: se siguen (su last_seen sirve para diagnosticar) pero NUNCA
 	// alertan al irse ni al volver. Un portatil que se cierra, el R1 en el
 	// bolsillo o una tablet que se guarda no son incidentes: son lo normal.
@@ -73,6 +84,18 @@ type NodeState struct {
 type State struct {
 	mu    sync.Mutex
 	Nodes map[string]*NodeState `json:"nodes"`
+	// Mantenimiento: nodo -> epoch hasta el que su silencio esta ANUNCIADO.
+	// Se guarda en el estado (no en la config) para que sobreviva a un
+	// reinicio del colector: una parada anunciada no puede volverse alerta
+	// porque el vigilante se reinicio en medio.
+	Mantenimiento map[string]int64 `json:"mantenimiento,omitempty"`
+}
+
+// enMantenimiento dice si el silencio del nodo esta anunciado. El que llama
+// DEBE tener state.mu tomado.
+func enMantenimiento(node string) bool {
+	hasta, ok := state.Mantenimiento[node]
+	return ok && time.Now().Unix() < hasta
 }
 
 var (
@@ -96,17 +119,77 @@ func saveState() {
 	os.WriteFile(cfg.StatePath, b, 0600)
 }
 
+// avisar manda el MISMO texto por todas las vias configuradas. Ninguna depende
+// de la otra a proposito: Telegram necesita internet hacia api.telegram.org,
+// notify necesita el broker local; que una se caiga no puede dejar mudo al
+// unico vigilante que sobrevive a la caida de entry.
+func avisar(text string) {
+	telegram(text)
+	for _, destino := range cfg.NotifyTargets {
+		notificar(destino, text)
+	}
+}
+
+// notificar publica el aviso en notify (el R1 y los M5), que corre en esta
+// misma maquina. El R1 es "live only": si esta apagado el mensaje se pierde,
+// por eso los M5 —que si encolan— valen la pena como segundo destino.
+func notificar(destino, text string) {
+	if cfg.NotifyURL == "" || cfg.NotifyToken == "" {
+		return
+	}
+	// notify rechaza con 413 cualquier texto de mas de 280 caracteres. Se
+	// recorta aqui para que un mensaje largo llegue cortado en vez de no
+	// llegar.
+	if r := []rune(text); len(r) > 280 {
+		text = string(r[:277]) + "..."
+	}
+	cuerpo, _ := json.Marshal(map[string]string{"target": destino, "text": text, "source": "heartbeat"})
+	req, err := http.NewRequest("POST", cfg.NotifyURL, bytes.NewReader(cuerpo))
+	if err != nil {
+		log.Printf("notify %s: no se pudo armar la peticion: %v", destino, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+cfg.NotifyToken)
+	cl := &http.Client{Timeout: 15 * time.Second}
+	r, err := cl.Do(req)
+	if err != nil {
+		log.Printf("notify %s: fallo el envio: %v", destino, err)
+		return
+	}
+	defer r.Body.Close()
+	if r.StatusCode != http.StatusAccepted {
+		resp, _ := io.ReadAll(io.LimitReader(r.Body, 300))
+		log.Printf("notify %s: respondio %d: %s", destino, r.StatusCode, strings.TrimSpace(string(resp)))
+		return
+	}
+	log.Printf("notify %s: enviado", destino)
+}
+
 func telegram(text string) {
 	if cfg.TelegramToken == "" {
+		log.Printf("Telegram: sin token configurado, aviso NO enviado: %s", text)
 		return
 	}
 	form := url.Values{}
 	form.Set("chat_id", cfg.TelegramChat)
 	form.Set("text", text)
 	cl := &http.Client{Timeout: 15 * time.Second}
-	if r, err := cl.PostForm("https://api.telegram.org/bot"+cfg.TelegramToken+"/sendMessage", form); err == nil {
-		r.Body.Close()
+	r, err := cl.PostForm("https://api.telegram.org/bot"+cfg.TelegramToken+"/sendMessage", form)
+	if err != nil {
+		log.Printf("Telegram: fallo el envio: %v", err)
+		return
 	}
+	defer r.Body.Close()
+	// El motivo real viene en el CUERPO ("chat not found", "bot was blocked"),
+	// no en el codigo. Tirarlo, como se hacia antes, deja al ultimo vigilante
+	// que queda fallando en silencio: se cree que aviso y nadie recibio nada.
+	if r.StatusCode != http.StatusOK {
+		resp, _ := io.ReadAll(io.LimitReader(r.Body, 300))
+		log.Printf("Telegram: respondio %d: %s", r.StatusCode, strings.TrimSpace(string(resp)))
+		return
+	}
+	log.Printf("Telegram: enviado")
 }
 
 // POST /hb  node=X token=... uptime=...
@@ -136,6 +219,15 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 		state.Nodes[node] = ns
 	}
 	wasDown := ns.Down
+	// Si volvio dentro de su ventana de mantenimiento, la ventana se cierra
+	// aqui: ya reporta, no hay nada que silenciar. Y se avisa —una parada
+	// anunciada que nadie confirma que termino es igual de ciega que una
+	// caida sin alerta.
+	volvioDeMantenimiento := false
+	if state.Mantenimiento != nil && enMantenimiento(node) {
+		volvioDeMantenimiento = true
+		delete(state.Mantenimiento, node)
+	}
 	ns.LastSeen, ns.Uptime, ns.Down = now, up, false
 	ns.PublicIP = ipDeOrigen(r)
 	// Solo se pisa si el latido trae memoria de verdad: un binario viejo sin
@@ -144,8 +236,12 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 		ns.MemUsedMB, ns.MemTotalMB = memUsed, memTotal
 	}
 	state.mu.Unlock()
-	if wasDown {
-		telegram(fmt.Sprintf("✅ heartbeat: %s volvió a reportar (por internet).", node))
+	switch {
+	case volvioDeMantenimiento:
+		saveState()
+		avisar(fmt.Sprintf("✅ heartbeat: %s volvió del mantenimiento (uptime %d min).", node, up/60))
+	case wasDown:
+		avisar(fmt.Sprintf("✅ heartbeat: %s volvió a reportar (por internet).", node))
 	}
 	// Se responde con la IP desde la que llegó el latido. El nodo no tiene
 	// otra forma de saber su IP pública sin preguntarle a un tercero, y le
@@ -176,6 +272,49 @@ func ipDeOrigen(r *http.Request) string {
 	return ""
 }
 
+// handleMantenimiento anuncia una parada: POST /mantenimiento node=entry mins=30
+// token=... . Mientras dure, el silencio de ese nodo NO alerta; al volver, si
+// avisa. `mins=0` la cancela. Existe para que apagar un nodo a proposito no
+// obligue a elegir entre recibir ruido o apagar el vigilante y olvidarse de
+// volver a encenderlo.
+func handleMantenimiento(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm()
+	if r.FormValue("token") != cfg.Token {
+		http.Error(w, "denied", http.StatusForbidden)
+		return
+	}
+	node := r.FormValue("node")
+	if node == "" {
+		http.Error(w, "no node", http.StatusBadRequest)
+		return
+	}
+	var mins int64
+	fmt.Sscan(r.FormValue("mins"), &mins)
+	// Tope de 12 h: un mantenimiento "para siempre" es un vigilante apagado
+	// con otro nombre, y eso es exactamente lo que no se quiere.
+	if mins > 720 {
+		mins = 720
+	}
+	state.mu.Lock()
+	if state.Mantenimiento == nil {
+		state.Mantenimiento = map[string]int64{}
+	}
+	if mins <= 0 {
+		delete(state.Mantenimiento, node)
+	} else {
+		state.Mantenimiento[node] = time.Now().Unix() + mins*60
+	}
+	state.mu.Unlock()
+	saveState()
+	if mins <= 0 {
+		avisar(fmt.Sprintf("🔧 heartbeat: %s sale de mantenimiento, vuelve a vigilarse.", node))
+		fmt.Fprintln(w, "ok, vigilando", node)
+		return
+	}
+	avisar(fmt.Sprintf("🔧 heartbeat: %s en mantenimiento %d min — no alerto por su silencio, pero aviso cuando vuelva.", node, mins))
+	fmt.Fprintf(w, "ok, %s en mantenimiento %d min\n", node, mins)
+}
+
 func handleStatus(w http.ResponseWriter, r *http.Request) {
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -183,7 +322,11 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	out := map[string]any{}
 	for n, ns := range state.Nodes {
-		out[n] = map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime, "movil": esMovil(n), "mem_used_mb": ns.MemUsedMB, "mem_total_mb": ns.MemTotalMB}
+		fila := map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime, "movil": esMovil(n), "mem_used_mb": ns.MemUsedMB, "mem_total_mb": ns.MemTotalMB}
+		if hasta, ok := state.Mantenimiento[n]; ok && now < hasta {
+			fila["mantenimiento_min_restantes"] = (hasta - now + 59) / 60
+		}
+		out[n] = fila
 	}
 	json.NewEncoder(w).Encode(out)
 }
@@ -219,13 +362,20 @@ func deadManLoop() {
 				ns.Down = false
 				continue
 			}
+			if enMantenimiento(node) {
+				// Parada anunciada por Steven: no se alerta por su silencio.
+				// Tampoco se marca Down, para que al volver el aviso sea el
+				// de "volvió del mantenimiento" y no un falso "volvió a
+				// reportar" de algo que nunca se reporto como caido.
+				continue
+			}
 			silent := now - ns.LastSeen
 			if silent > int64(cfg.DeadAfterSecs) {
 				if !ns.Down || now-ns.LastAlert >= realert {
 					mins := silent / 60
 					// MCL-199: la memoria de justo antes de callarse, para que
 					// la alerta diagnostique en vez de solo constatar.
-					telegram(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s", node, mins, memInfoSuffix(ns)))
+					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s", node, mins, memInfoSuffix(ns)))
 					ns.Down = true
 					ns.LastAlert = now
 				}
@@ -247,7 +397,10 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 	if cfg.DeadAfterSecs == 0 {
-		cfg.DeadAfterSecs = 600 // 10 min sin latido = alerta
+		// 3 min. Antes eran 10, y por eso una caida de entry de 8 minutos
+		// (resize del 2026-09-18) no genero UNA sola alerta: el unico
+		// vigilante que sobrevive a entry no llegaba a mirar a tiempo.
+		cfg.DeadAfterSecs = 180
 	}
 	if cfg.RealertHours == 0 {
 		cfg.RealertHours = 8
@@ -263,6 +416,7 @@ func main() {
 		fmt.Fprintln(w, ipDeOrigen(r))
 	})
 	http.HandleFunc("/status", handleStatus)
+	http.HandleFunc("/mantenimiento", handleMantenimiento)
 	log.Printf("heartbeat-collector escuchando en %s", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
 }

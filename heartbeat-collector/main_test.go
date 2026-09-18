@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // Un nodo movil que se va no es un incidente. Sin esta exencion, el dead-man
 // alertaba por un portatil cerrado o una tablet guardada, que es justo el ruido
@@ -44,5 +47,30 @@ func TestMemInfoSuffixSinDatos(t *testing.T) {
 	ns := &NodeState{}
 	if got := memInfoSuffix(ns); got != "" {
 		t.Errorf("memInfoSuffix() sin memoria = %q, want vacio", got)
+	}
+}
+
+// Una parada anunciada silencia el silencio de ESE nodo y de ninguno mas, y se
+// acaba sola. Lo contrario —silenciar "hasta nuevo aviso"— es apagar el
+// vigilante y olvidarse de encenderlo, que es como se llega a no enterarse de
+// una caida (2026-09-18).
+func TestMantenimientoSoloCallaAlNodoAnunciadoYCaduca(t *testing.T) {
+	ahora := time.Now().Unix()
+	state.Mantenimiento = map[string]int64{
+		"entry":   ahora + 600, // en curso
+		"x1-nano": ahora - 60,  // ya vencido
+	}
+	if !enMantenimiento("entry") {
+		t.Error("entry esta en mantenimiento en curso: no debe alertar por su silencio")
+	}
+	if enMantenimiento("x1-nano") {
+		t.Error("el mantenimiento de x1-nano ya vencio: tiene que volver a vigilarse solo")
+	}
+	if enMantenimiento("steven-mini") {
+		t.Error("un nodo que nadie anuncio no puede quedar silenciado de rebote")
+	}
+	state.Mantenimiento = nil
+	if enMantenimiento("entry") {
+		t.Error("sin mantenimientos declarados no debe callarse nada")
 	}
 }

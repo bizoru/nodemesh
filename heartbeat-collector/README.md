@@ -15,14 +15,34 @@ Vive FUERA de entry a propósito: entry concentra todo el alertado y era el SPOF
 - El colector guarda last_seen y la ÚLTIMA memoria conocida por nodo
   (`/var/lib/heartbeat/state.json`). Un binario viejo que no mande `mem_*` no
   borra el último dato bueno (ver el guard en `handleHB`).
-- Bucle dead-man: si un nodo de `expect` calla > `deadAfterSecs` (10 min), alerta
-  por la API DIRECTA de Telegram (chat 66513789), con la última memoria
+- Bucle dead-man: si un nodo de `expect` calla > `deadAfterSecs` (3 min: tres
+  latidos perdidos), alerta por **dos vías independientes** — la API DIRECTA de
+  Telegram (chat 66513789) y **notify** (`notifyTargets`, hoy el R1 y los M5),
+  que corre en esta misma máquina. Con la última memoria
   conocida si la hay (MCL-199, postmortem del OOM de entry 2026-09-12: antes el
   mensaje era solo "no reporta"; ahora, cuando hay dato, dice algo como
   "Última memoria conocida: 3502/4096 MB (85%)" — la diferencia entre "se
   cayó" y "se está quedando sin memoria"). Re-alerta cada `realertHours`. ✅ al
   volver.
 - `/status` (JSON) para ver last_seen_ago_s y mem_used_mb/mem_total_mb por nodo.
+- `POST /mantenimiento node=entry mins=30 token=...` anuncia una parada: mientras
+  dure, el silencio de ese nodo NO alerta, pero al volver SÍ avisa. `mins=0` la
+  cancela; el tope son 12 h. Es la alternativa a apagar el vigilante y olvidarse
+  de encenderlo.
+
+## Por qué 3 minutos y dos vías (2026-09-18)
+El 18-sep entry estuvo apagada 8 minutos para un resize y **no salió una sola
+alerta**. Tres fallos a la vez, y los tres silenciosos:
+
+1. `deadAfterSecs` eran 600, así que una caída de 8 min no llegaba a mirarse.
+2. `telegramToken` estaba **vacío** desde el 11-sep por lo menos: el colector
+   marcaba `last_alert` y no enviaba nada. El `telegram()` de entonces se
+   tragaba el error, el código HTTP y el token vacío sin registrar una línea.
+3. El aviso sólo iba a Telegram, nunca a los aparatos.
+
+De ahí: umbral de 3 min (con los nodos latiendo cada 60 s), envío también por
+notify, y **todo fallo de envío se registra** — un vigilante que cree haber
+avisado y no avisó es peor que no tener vigilante.
 
 ### Pendiente, no implementado aquí (MCL-199, ver el postmortem)
 Memoria usada/total ya dice mucho ("iba al 92%" no es lo mismo que "llevaba
