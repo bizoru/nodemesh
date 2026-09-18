@@ -765,14 +765,49 @@ func handleSites(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// mezclaSitios incorpora lo que un peer sabe. El catálogo escrito a mano no se
-// pisa: lo aprendido es una capa aparte que solo suma.
+// mezclaSitios incorpora lo que un peer sabe: sedes nuevas, y señales nuevas
+// de las que ya se conocían.
+//
+// Es UNIÓN y no "la primera que llegó gana", que era el primer intento y no
+// servía para nada: sembrar una red nueva en un solo nodo no llegaba a los
+// demás porque todos tenían ya esa sede, solo que más pobre. Unir es además lo
+// seguro, porque una señal que acaban reclamando dos sedes deja de resolver
+// —ver unico()— en vez de contestar cualquier cosa.
+//
+// Nada de esto borra: quitar una red del catálogo se hace en la config de
+// quien la tenía, y las huellas aprendidas caducan solas.
 func mezclaSitios(cat map[string]Site, aprendidas []huellaAprendida) {
-	sitios.mu.Lock()
-	for n, s := range cat {
-		if _, ok := sitios.catalogo[n]; !ok {
-			sitios.catalogo[n] = s
+	une := func(a, b []string, norm func(string) string) []string {
+		vistos := map[string]bool{}
+		out := []string{}
+		for _, v := range append(append([]string{}, a...), b...) {
+			k := norm(v)
+			if k == "" || vistos[k] {
+				continue
+			}
+			vistos[k] = true
+			out = append(out, v)
 		}
+		sort.Strings(out)
+		return out
+	}
+	tal := func(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+	sitios.mu.Lock()
+	for n, nuevo := range cat {
+		cur, ok := sitios.catalogo[n]
+		if !ok {
+			sitios.catalogo[n] = nuevo
+			continue
+		}
+		if cur.Region == "" {
+			cur.Region = nuevo.Region
+		}
+		cur.SSIDs = une(cur.SSIDs, nuevo.SSIDs, normalizaSSID)
+		cur.Subnets = une(cur.Subnets, nuevo.Subnets, tal)
+		cur.Gateways = une(cur.Gateways, nuevo.Gateways, normMAC)
+		cur.Prefixes = une(cur.Prefixes, nuevo.Prefixes, tal)
+		sitios.catalogo[n] = cur
 	}
 	sitios.mu.Unlock()
 	for _, h := range aprendidas {

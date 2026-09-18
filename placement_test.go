@@ -168,3 +168,29 @@ func TestLaEtiquetaDistingueUbicadoDeEstimado(t *testing.T) {
 		t.Fatalf("una estimación se marca: %q", etiquetaSitio(estimado))
 	}
 }
+
+func TestElCatalogoSeUneEnVezDePisarse(t *testing.T) {
+	// Sembrar una red nueva en UN nodo tiene que llegar al resto. Con "la
+	// primera que llegó gana" no llegaba nunca: los demás ya tenían esa sede,
+	// solo que sin la señal nueva.
+	reinicia(map[string]Site{
+		"Socorro": {Region: "co", SSIDs: []string{"STEVEN.SIERRA"}},
+	})
+	mezclaSitios(map[string]Site{
+		"Socorro":  {Region: "co", Gateways: []string{"74:24:9f:71:da:85"}},
+		"Helsinki": {Region: "eu"},
+	}, nil)
+
+	if s := porGateway("74:24:9f:71:da:85"); s != "Socorro" {
+		t.Fatalf("la señal nueva debe quedarse, dio %q", s)
+	}
+	if s := porSSID("STEVEN.SIERRA_5G"); s != "Socorro" {
+		t.Fatalf("y la que ya estaba no se pierde, dio %q", s)
+	}
+	sitios.mu.RLock()
+	_, hayNueva := sitios.catalogo["Helsinki"]
+	sitios.mu.RUnlock()
+	if !hayNueva {
+		t.Fatal("una sede que no se conocía se añade entera")
+	}
+}
