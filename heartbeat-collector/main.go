@@ -81,6 +81,15 @@ type NodeState struct {
 	// solo "no contesta".
 	MemUsedMB  int64 `json:"mem_used_mb,omitempty"`
 	MemTotalMB int64 `json:"mem_total_mb,omitempty"`
+	// Red del nodo tal y como ÉL la ve: SSID (o el nombre del sitio deducido),
+	// IP de LAN y si va por wifi o cable. La IP pública de abajo dice por qué
+	// salida se fue el paquete; esto dice a qué red está enganchado y con qué
+	// dirección — que es lo que hace falta cuando en un mismo sitio hay dos
+	// proveedores (Socorro) o cuando el nodo no está en el tailnet y su estado
+	// no llega por gossip a nadie (rigby).
+	SSID    string `json:"ssid,omitempty"`
+	LocalIP string `json:"local_ip,omitempty"`
+	NetType string `json:"net_type,omitempty"`
 	// PublicIP: desde dónde salió el último latido. No lo manda el nodo —lo
 	// ve el colector—, así que es el único dato de aquí que el emisor no
 	// puede falsear sin cambiar de red de verdad. Sirve para ubicar al nodo
@@ -248,6 +257,18 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	if memTotal > 0 {
 		ns.MemUsedMB, ns.MemTotalMB = memUsed, memTotal
 	}
+	// Misma regla para la red: vacio NO pisa. Asi conviven binarios viejos y
+	// nuevos, y un nodo que momentaneamente no sepa su SSID (wifi reasociando)
+	// no borra el ultimo que si se supo.
+	if v := r.FormValue("ssid"); v != "" {
+		ns.SSID = v
+	}
+	if v := r.FormValue("local_ip"); v != "" {
+		ns.LocalIP = v
+	}
+	if v := r.FormValue("net_type"); v != "" {
+		ns.NetType = v
+	}
 	state.mu.Unlock()
 	switch {
 	case volvioDeMantenimiento:
@@ -336,6 +357,13 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{}
 	for n, ns := range state.Nodes {
 		fila := map[string]any{"last_seen_ago_s": now - ns.LastSeen, "down": ns.Down, "uptime_s": ns.Uptime, "movil": esMovil(n), "mem_used_mb": ns.MemUsedMB, "mem_total_mb": ns.MemTotalMB}
+		// Campos opcionales: solo salen si el nodo los ha mandado alguna vez,
+		// para que un cliente viejo no aparezca con cadenas vacias.
+		for k, v := range map[string]string{"ssid": ns.SSID, "local_ip": ns.LocalIP, "net_type": ns.NetType, "public_ip": ns.PublicIP} {
+			if v != "" {
+				fila[k] = v
+			}
+		}
 		if hasta, ok := state.Mantenimiento[n]; ok && now < hasta {
 			fila["mantenimiento_min_restantes"] = (hasta - now + 59) / 60
 		}
@@ -352,6 +380,27 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 // la ULTIMA memoria conocida del nodo (no hay otra: si el nodo no contesta al
 // latido, tampoco va a contestar a un /metrics en vivo). Vacio si nunca llego
 // memoria (cliente viejo, o nodo movil sin este campo) — MCL-199.
+// redInfoSuffix dice en que red estaba el nodo la ultima vez que hablo. En un
+// dead-man eso es la mitad del diagnostico: "se cayo" y "se fue a la otra red"
+// se parecen desde fuera, y en Socorro —dos proveedores en la misma casa— es
+// la diferencia entre ir a encender una maquina o no moverse del sitio.
+func redInfoSuffix(ns *NodeState) string {
+	partes := []string{}
+	if ns.SSID != "" {
+		partes = append(partes, ns.SSID)
+	}
+	if ns.LocalIP != "" {
+		partes = append(partes, ns.LocalIP)
+	}
+	if ns.PublicIP != "" {
+		partes = append(partes, "salida "+ns.PublicIP)
+	}
+	if len(partes) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Última red conocida: %s.", strings.Join(partes, " · "))
+}
+
 func memInfoSuffix(ns *NodeState) string {
 	if ns.MemTotalMB <= 0 {
 		return ""
@@ -392,7 +441,7 @@ func deadManLoop() {
 					mins := silent / 60
 					// MCL-199: la memoria de justo antes de callarse, para que
 					// la alerta diagnostique en vez de solo constatar.
-					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s", node, mins, memInfoSuffix(ns)))
+					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s%s", node, mins, redInfoSuffix(ns), memInfoSuffix(ns)))
 					ns.Down = true
 					ns.LastAlert = now
 				}

@@ -1309,7 +1309,7 @@ func main() {
 	// BLE beacon state watch loop (only when BLEStatePath is set — see Config)
 	go bleWatchLoop(cfg)
 	// heartbeat push a endpoint público (solo si HeartbeatURL está puesto)
-	go heartbeatLoop(cfg)
+	go heartbeatLoop(cfg, store)
 	// IP pública propia (solo si PublicIPURL está puesto): es lo que ubica a
 	// los nodos a los que el sistema les esconde el SSID y la tabla ARP.
 	go ipPublicaLoop(cfg)

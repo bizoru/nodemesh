@@ -19,7 +19,7 @@ import (
 // su uptime y un token compartido (el endpoint es público; el token evita que
 // cualquiera falsifique latidos). Cadencia propia (HeartbeatSecs), típicamente
 // más lenta que el collector.
-func heartbeatLoop(cfg *Config) {
+func heartbeatLoop(cfg *Config, store *Store) {
 	if cfg.HeartbeatURL == "" {
 		return
 	}
@@ -33,12 +33,12 @@ func heartbeatLoop(cfg *Config) {
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	for {
-		sendHeartbeat(cfg, client)
+		sendHeartbeat(cfg, store, client)
 		time.Sleep(time.Duration(interval) * time.Second)
 	}
 }
 
-func sendHeartbeat(cfg *Config, client *http.Client) {
+func sendHeartbeat(cfg *Config, store *Store, client *http.Client) {
 	form := url.Values{}
 	form.Set("node", cfg.Node)
 	form.Set("token", cfg.HeartbeatToken)
@@ -54,6 +54,29 @@ func sendHeartbeat(cfg *Config, client *http.Client) {
 	specs := localSpecs()
 	form.Set("mem_used_mb", fmt.Sprint(specs.MemUsedMB))
 	form.Set("mem_total_mb", fmt.Sprint(specs.MemTotalMB))
+	// Red y dirección del nodo. El colector ya ve la IP PÚBLICA (la de salida),
+	// pero eso no distingue dos máquinas de la misma casa ni dice a qué SSID
+	// está enganchada cada una: eso es justo lo que hace falta en Socorro, con
+	// dos proveedores en el mismo sitio y nodos que saltan de uno a otro.
+	//
+	// Se lee de la CABEZA de su propia cadena, que el bucle de gossip ya
+	// mantiene al día: cero exec extra por latido. Importante en rigby, que es
+	// un Atom con 1 GB donde cada `netsh` se nota.
+	//
+	// Y es la única vía para un nodo FUERA del tailnet: rigby no está en la
+	// malla, así que su estado de red no llega por gossip a nadie más que a su
+	// vecina de LAN. Por el latido llega siempre que haya internet.
+	if r, ok := store.Head(cfg.Node); ok {
+		if r.SSID != "" {
+			form.Set("ssid", r.SSID)
+		}
+		if r.LocalIP != "" {
+			form.Set("local_ip", r.LocalIP)
+		}
+		if r.NetType != "" {
+			form.Set("net_type", r.NetType)
+		}
+	}
 	resp, err := client.PostForm(cfg.HeartbeatURL, form)
 	if err != nil {
 		// silencioso salvo debug: un latido perdido no es un error del nodo,
