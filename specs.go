@@ -29,7 +29,10 @@ type Specs struct {
 	DiskTotalGB float64 `json:"diskTotalGB,omitempty"` // el volumen de DataDir (ver specsDiskPath)
 	DiskFreeGB  float64 `json:"diskFreeGB,omitempty"`
 	Load1       float64 `json:"load1,omitempty"` // solo unix: Windows no tiene loadavg
-	CollectedAt int64   `json:"collectedAt,omitempty"`
+	// Net: velocidad de red del nodo (enlace negociado y tráfico observado).
+	// Vive aquí y no en Record por lo mismo que MemUsedMB — ver netspeed.go.
+	Net         *NetLink `json:"net,omitempty"`
+	CollectedAt int64    `json:"collectedAt,omitempty"`
 }
 
 // specsTTL: cada cuánto se refresca la parte volátil. El gossip y la UI piden
@@ -77,6 +80,7 @@ func localSpecs() Specs {
 	s.MemUsedMB = memUsedMB()
 	s.DiskTotalGB, s.DiskFreeGB = diskGB(specsDiskPath)
 	s.Load1 = load1()
+	s.Net = localNetLink()
 	s.CollectedAt = time.Now().Unix()
 	specsCache.last, specsCache.at = s, time.Now()
 	return s

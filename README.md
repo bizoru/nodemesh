@@ -139,11 +139,11 @@ Any node answers for all nodes.
 | `GET /api/history/{node}?limit=N` | Newest-first history |
 | `GET /api/log/{node}?after=SEQ` | Chain segment (what gossip consumes) |
 | `GET /api/verify/{node}` | Walk the chain, report valid + length |
-| `GET /api/specs` | This node's hardware: model, CPU, cores, RAM, disk, load |
+| `GET /api/specs` | This node's hardware: model, CPU, cores, RAM, disk, load, network speed |
 | `GET /api/capacity` | **Fleet totals** — cores, RAM and disk summed across every reachable node |
 | `GET /api/host` | This node only: battery (`present`/`percent`/`charging`) |
 | `GET /api/ports` | This node's listening ports |
-| `GET /metrics` | Prometheus: this node's specs (+ BLE beacon where configured) |
+| `GET /metrics` | Prometheus: this node's specs and network speed (+ BLE beacon where configured) |
 | `POST /api/restart` | Localhost only — exit so the supervisor restarts |
 
 `charging` means *on external power*, not "the percentage is rising": a laptop
@@ -192,6 +192,69 @@ be structurally incapable of triggering it.
 
 Load average is unix-only; Windows reports `0` rather than substituting a
 CPU-percentage that would not mean the same thing.
+
+## Network speed
+
+Each node also reports how fast the network it sits on is, under `specs.net`:
+
+```
+$ curl -s node:7777/api/specs | jq .net
+{ "iface": "eth0", "linkMbps": 1000, "linkSource": "sysfs",
+  "rxKbps": 812.4, "txKbps": 96.1,
+  "rxPeakKbps": 387410.2, "txPeakKbps": 21880.7,
+  "windowSec": 30, "peakSince": 1790041200 }
+```
+
+Those are **two different things**, and conflating them is the whole trap:
+
+- `linkMbps` is the **negotiated speed of the first hop** — `1000baseT`, the
+  wifi PHY rate. It is the capacity of the cable or the air, *not* the internet
+  connection: a laptop next to the router negotiates 866 Mb/s on a 50 Mb line.
+- `rxKbps`/`txKbps` are **traffic actually observed**, derived from the byte
+  counters the interface already keeps, averaged over `windowSec`.
+
+Both are **passive**. Nothing here generates a single byte of traffic, which is
+deliberate: an active speedtest costs data and battery, and this fleet has
+nodes that cannot pay for it — the R1 and the laptops on battery, `gcp-east` on
+a metered e2-micro. The whole cost is reading two files every 30s.
+
+`rxPeakKbps` is the closest thing to "how much network is really there" that
+you get without measuring actively, and it has to be read for what it is: **a
+demonstrated floor, never a capacity.** If it once hit 40 Mb/s there is at
+least 40 Mb/s; never having exceeded 2 Mb/s says nobody asked for more, not
+that more is unavailable. It resets when the process restarts (`peakSince`).
+
+A field is **absent when the system does not publish it**, which is commoner
+than it sounds: wifi on Linux without WEXT, virtio NICs on VPS hosts that
+report `-1`, a Mac not running as root. The same applies to `/metrics`, where
+the series is omitted rather than exported as `0` — a `0` is indistinguishable
+from "link down", which is precisely what these metrics have to be able to
+alert on.
+
+Where each number comes from, per platform:
+
+| | Link speed | Traffic | Signal |
+|---|---|---|---|
+| Linux | `/sys/class/net/*/speed`, else the `SIOCGIWRATE` ioctl on wifi | `/sys/class/net/*/statistics/*_bytes` | `/proc/net/wireless` |
+| macOS | `ifconfig` media, or `wdutil` when root (wifi rate + RSSI) | `netstat -ibn` | `wdutil`, root only |
+| Windows | `GetIfEntry` (`dwSpeed`) | `GetIfEntry` (`dwInOctets`/`dwOutOctets`) | — |
+
+Linux stays at **zero `exec`**, for the reason given above — which is why wifi
+rate comes from the old Wireless Extensions ioctl instead of `iw dev X link`:
+an ioctl on an already-open socket never reaches `faccessat2`. Windows pays
+**no new process either**: `MIB_IFROW` carries link speed *and* counters in one
+call, so `athena` (tight on RAM) and `rigby` (an Atom with 1 GB) do not get a
+PowerShell every 30s. Its counters are 32-bit and wrap every 4 GB — 1.1 Gb/s
+sustained over a 30s window, which nothing here reaches; if it ever happened
+the delta goes negative and the sample is discarded rather than published.
+
+A rate needs two samples, so the first round after start-up never reports one:
+it seeds the reference. The same happens when the default interface changes
+(a laptop going from wifi to cable starts fresh counters), when the counters go
+backwards, or when more than 15 minutes passed between samples — averaging a
+three-second download across three hours describes nothing. **A gap is
+preferable to a number that means nothing**; a genuinely idle node, by
+contrast, reports a real `0`, and the two are distinguishable.
 
 ## Configure
 

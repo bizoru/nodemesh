@@ -1222,6 +1222,45 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 		} {
 			fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s%s %g\n", m.name, m.help, m.name, m.name, lbl, m.val)
 		}
+		// Red: aparte del bucle de arriba porque llevan label `iface` — sin
+		// él, un portátil que salta de wifi a ethernet pisaría su propia
+		// serie y el salto de velocidad parecería una caída del enlace.
+		//
+		// Una serie que falta significa "el sistema no publica ese dato"
+		// (wifi en Linux sin WEXT, un Mac que no corre como root, una virtio
+		// que no sabe su velocidad). Se OMITE en vez de emitir un 0 porque un
+		// 0 es indistinguible de "enlace caído", que es justo lo que estas
+		// métricas tienen que poder alertar.
+		if n := s.Net; n != nil {
+			// net_type viene de la CABEZA de la cadena, que el ciclo de
+			// colecta ya mantiene al dia (mismo truco que el latido: cero
+			// coste extra). Va como label porque sin el una alerta de enlace
+			// degradado no puede distinguir un cable —cuya velocidad
+			// negociada no se mueve nunca, y si baja es una averia— de un
+			// wifi, que sube y baja solo todo el dia.
+			netType := "unknown"
+			if r, ok := store.Head(cfg.Node); ok && r.NetType != "" {
+				netType = r.NetType
+			}
+			nlbl := fmt.Sprintf("{node=%q,iface=%q,net_type=%q}", cfg.Node, n.Iface, netType)
+			for _, m := range []struct {
+				name, help string
+				val        float64
+				emit       bool
+			}{
+				{"nodemesh_node_link_speed_bits_per_second", "negotiated link speed of the default interface (capacity of the first hop, not internet bandwidth)", float64(n.LinkMbps) * 1e6, n.LinkMbps > 0},
+				{"nodemesh_node_wifi_rssi_dbm", "wifi signal level of the default interface", float64(n.RSSI), n.RSSI < 0},
+				{"nodemesh_node_network_receive_bits_per_second", "observed inbound traffic, averaged over the last sampling window", n.RxKbps * 1000, n.WindowSec > 0},
+				{"nodemesh_node_network_transmit_bits_per_second", "observed outbound traffic, averaged over the last sampling window", n.TxKbps * 1000, n.WindowSec > 0},
+				{"nodemesh_node_network_receive_peak_bits_per_second", "highest inbound rate observed since this process started: a demonstrated floor for the link, never a capacity", n.RxPeakKbps * 1000, n.RxPeakKbps > 0},
+				{"nodemesh_node_network_transmit_peak_bits_per_second", "highest outbound rate observed since this process started", n.TxPeakKbps * 1000, n.TxPeakKbps > 0},
+			} {
+				if !m.emit {
+					continue
+				}
+				fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s%s %g\n", m.name, m.help, m.name, m.name, nlbl, m.val)
+			}
+		}
 		bleState.mu.RLock()
 		c := bleState.check
 		bleState.mu.RUnlock()
