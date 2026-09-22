@@ -115,6 +115,27 @@ function bleNote(n) {
 
 const fmtGB = v => v == null ? "—" : (v >= 1024 ? (v/1024).toFixed(1)+" TB" : Math.round(v)+" GB");
 
+// fmtBps: kbps → texto. Por debajo de 1 Mb/s se ven los kb, que es donde vive
+// el tráfico normal de un nodo en reposo.
+const fmtBps = k => k >= 1000 ? (k/1000).toFixed(1)+" Mb/s" : Math.round(k)+" kb/s";
+
+// netBlock: la velocidad de red, que son DOS cosas y la tarjeta las separa a
+// propósito (ver netspeed.go). El enlace es capacidad del primer salto; las
+// flechas son tráfico observado, no un speedtest — aquí no se mide activamente.
+// El pico se etiqueta "al menos" porque eso es literalmente lo que demuestra:
+// un piso, no un techo.
+function netBlock(n) {
+  const w = n.specs && n.specs.net;
+  if (!w) return "";
+  const bits = [];
+  if (w.linkMbps) bits.push(`enlace <b>${w.linkMbps >= 1000 ? (w.linkMbps/1000).toFixed(1)+" Gb/s" : w.linkMbps+" Mb/s"}</b>`);
+  if (w.rssi) bits.push(`señal ${w.rssi} dBm`);
+  if (w.windowSec) bits.push(`↓ ${fmtBps(w.rxKbps)} ↑ ${fmtBps(w.txKbps)}`);
+  if (w.rxPeakKbps) bits.push(`<span title="mayor tasa observada desde que arrancó el proceso: demuestra un piso, no un techo">pico ≥ ${fmtBps(w.rxPeakKbps)}</span>`);
+  if (!bits.length) return `<br>red: ${w.iface} — el sistema no publica velocidad`;
+  return `<br>red ${w.iface}: ${bits.join(" · ")}`;
+}
+
 // specsBlock: lo que hasta ahora había que ir a sacar con ssh nodo por nodo.
 // La barra es de RAM, no de disco: es el recurso que de verdad limita qué se
 // puede programar en cada máquina de esta flota.
@@ -132,6 +153,7 @@ function specsBlock(n) {
     <div class="bar"><i class="${pct >= 85 ? "hot" : ""}" style="width:${pct}%"></i></div>
     RAM ${memU.toFixed(1)}/${memT.toFixed(1)} GB (${pct}%) · disco ${fmtGB(s.diskFreeGB)} libres de ${fmtGB(s.diskTotalGB)}
     ${s.load1 ? " · carga " + s.load1.toFixed(2) : ""}
+    ${netBlock(n)}
     ${age !== null && age > 10 ? `<br><span style="color:var(--stale)">specs de hace ${age} min</span>` : ""}
   </div>`;
 }
