@@ -87,9 +87,15 @@ type NodeState struct {
 	// dirección — que es lo que hace falta cuando en un mismo sitio hay dos
 	// proveedores (Socorro) o cuando el nodo no está en el tailnet y su estado
 	// no llega por gossip a nadie (rigby).
-	SSID    string `json:"ssid,omitempty"`
-	LocalIP string `json:"local_ip,omitempty"`
-	NetType string `json:"net_type,omitempty"`
+	// LanPeer/LanPeerOK: a quien vigila este nodo en su LAN y si lo ve. Lo
+	// manda QUIEN MIRA, no el mirado, asi que sobrevive a que el mirado este
+	// muerto — que es justo cuando hace falta.
+	LanPeer      string `json:"lan_peer,omitempty"`
+	LanPeerOK    bool   `json:"lan_peer_ok,omitempty"`
+	LanPeerVisto int64  `json:"lan_peer_visto,omitempty"`
+	SSID         string `json:"ssid,omitempty"`
+	LocalIP      string `json:"local_ip,omitempty"`
+	NetType      string `json:"net_type,omitempty"`
 	// PublicIP: desde dónde salió el último latido. No lo manda el nodo —lo
 	// ve el colector—, así que es el único dato de aquí que el emisor no
 	// puede falsear sin cambiar de red de verdad. Sirve para ubicar al nodo
@@ -260,6 +266,11 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	// Misma regla para la red: vacio NO pisa. Asi conviven binarios viejos y
 	// nuevos, y un nodo que momentaneamente no sepa su SSID (wifi reasociando)
 	// no borra el ultimo que si se supo.
+	if v := r.FormValue("lan_peer"); v != "" {
+		ns.LanPeer = v
+		ns.LanPeerOK = r.FormValue("lan_peer_ok") == "1"
+		ns.LanPeerVisto = now
+	}
 	if v := r.FormValue("ssid"); v != "" {
 		ns.SSID = v
 	}
@@ -364,6 +375,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 				fila[k] = v
 			}
 		}
+		if ns.LanPeer != "" {
+			fila["vigila_en_lan"] = ns.LanPeer
+			fila["vigila_en_lan_ok"] = ns.LanPeerOK
+		}
 		if hasta, ok := state.Mantenimiento[n]; ok && now < hasta {
 			fila["mantenimiento_min_restantes"] = (hasta - now + 59) / 60
 		}
@@ -384,6 +399,28 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 // dead-man eso es la mitad del diagnostico: "se cayo" y "se fue a la otra red"
 // se parecen desde fuera, y en Socorro —dos proveedores en la misma casa— es
 // la diferencia entre ir a encender una maquina o no moverse del sitio.
+// testigoSuffix busca si ALGUIEN mas dice ver a este nodo en su LAN. Es la
+// mitad del diagnostico que el dead-man nunca tuvo: "no reporta" se parece
+// demasiado a "esta apagado", y no son lo mismo.
+//
+// El que llama DEBE tener state.mu tomado (recorre state.Nodes).
+func testigoSuffix(node string) string {
+	for otro, ns := range state.Nodes {
+		if otro == node || ns.LanPeer != node {
+			continue
+		}
+		// Un testigo que lleva callado tanto como el vigilado no prueba nada.
+		if time.Now().Unix()-ns.LastSeen > 600 {
+			continue
+		}
+		if ns.LanPeerOK {
+			return fmt.Sprintf(" PERO %s SI lo ve en su LAN: encendido y sin internet, no hace falta ir.", otro)
+		}
+		return fmt.Sprintf(" Y %s TAMPOCO lo ve en su LAN (ni por ARP): apagado de verdad.", otro)
+	}
+	return ""
+}
+
 func redInfoSuffix(ns *NodeState) string {
 	partes := []string{}
 	if ns.SSID != "" {
@@ -441,7 +478,7 @@ func deadManLoop() {
 					mins := silent / 60
 					// MCL-199: la memoria de justo antes de callarse, para que
 					// la alerta diagnostique en vez de solo constatar.
-					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s%s", node, mins, redInfoSuffix(ns), memInfoSuffix(ns)))
+					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s%s%s", node, mins, testigoSuffix(node), redInfoSuffix(ns), memInfoSuffix(ns)))
 					ns.Down = true
 					ns.LastAlert = now
 				}

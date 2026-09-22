@@ -51,6 +51,17 @@ type Config struct {
 	// say "alive on the LAN, just off the tailnet" instead of just "gone".
 	// No credentials involved: a plain ICMP ping, not an API call.
 	LANPeer string `json:"lanPeer,omitempty"`
+	// LANPeerIP/LANPeerMAC: direccion del vecino y su MAC. Se separan del
+	// NOMBRE a proposito — `lanPeer` sigue siendo quien es, esto es donde
+	// esta. Hicieron falta el 2026-09-21: athena volvio de un apagon con
+	// .92 en vez de .93 y se llevo por delante todo lo que la nombraba por
+	// direccion. Con la MAC, el sondeo la vuelve a encontrar sola.
+	//
+	// En Windows el sondeo va por ARP, no por ping: el firewall de athena
+	// descarta ICMP, pero ARP lo contesta la pila por debajo del filtro, asi
+	// que una maquina encendida SIEMPRE responde. Ver arp_windows.go.
+	LANPeerIP  string `json:"lanPeerIP,omitempty"`
+	LANPeerMAC string `json:"lanPeerMAC,omitempty"`
 	// TSIP: dirección de Tailscale fijada a mano, para hosts donde no se puede
 	// autodetectar. Sólo hace falta en Android/Termux: allí no hay
 	// CLI de Tailscale y el sandbox de la app deja net.InterfaceAddrs() vacío,
@@ -743,6 +754,54 @@ func rutaPing() string {
 	return pingBin.v
 }
 
+// vecinoLAN guarda la direccion con la que se esta sondeando al vecino: puede
+// no ser la de la config si el DHCP lo movio y hubo que buscarlo por MAC.
+var vecinoLAN struct {
+	mu        sync.Mutex
+	ip        string
+	ultimaFue int64 // epoch del ultimo barrido por MAC, para no repetirlo
+}
+
+// sondeaVecino dice si el vecino de LAN esta vivo, y por donde.
+//
+// Orden: ARP a la direccion conocida (definitivo y barato) -> si falla y
+// tenemos su MAC, barrer la subred por si el DHCP lo movio (caro: como mucho
+// cada 10 min) -> si no hay direccion, ping al nombre, que es lo que habia
+// antes y sigue valiendo donde el ping funciona.
+func sondeaVecino(cfg *Config) bool {
+	vecinoLAN.mu.Lock()
+	ip := vecinoLAN.ip
+	if ip == "" {
+		ip = cfg.LANPeerIP
+	}
+	ultima := vecinoLAN.ultimaFue
+	vecinoLAN.mu.Unlock()
+
+	if ip != "" {
+		if dir := net.ParseIP(ip); dir != nil {
+			if mac := alcanzaPorARP(dir); mac != "" {
+				return true
+			}
+			// No contesta ahi. Puede estar apagado... o haberse movido.
+			ahora := time.Now().Unix()
+			if cfg.LANPeerMAC != "" && ahora-ultima > 600 {
+				vecinoLAN.mu.Lock()
+				vecinoLAN.ultimaFue = ahora
+				vecinoLAN.mu.Unlock()
+				if nueva := buscaPorMAC(dir, cfg.LANPeerMAC); nueva != "" {
+					log.Printf("vecino %s se movio a %s (encontrado por MAC %s)", cfg.LANPeer, nueva, cfg.LANPeerMAC)
+					vecinoLAN.mu.Lock()
+					vecinoLAN.ip = nueva
+					vecinoLAN.mu.Unlock()
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return pingHost(cfg.LANPeer)
+}
+
 // lanPeerLoop pings cfg.LANPeer on the same cadence as the collector, so a
 // tailscale outage on the peer shows up as "alive on LAN" within one cycle.
 func lanPeerLoop(cfg *Config) {
@@ -752,7 +811,7 @@ func lanPeerLoop(cfg *Config) {
 	var since int64
 	var last = -1 // -1: todavía no hay ninguna medición
 	for {
-		ok := pingHost(cfg.LANPeer)
+		ok := sondeaVecino(cfg)
 		now := time.Now().Unix()
 		if cur := b2i(ok); cur != last {
 			since = now // el resultado cambió: empieza a contar de nuevo

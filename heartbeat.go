@@ -66,6 +66,27 @@ func sendHeartbeat(cfg *Config, store *Store, client *http.Client) {
 	// Y es la única vía para un nodo FUERA del tailnet: rigby no está en la
 	// malla, así que su estado de red no llega por gossip a nadie más que a su
 	// vecina de LAN. Por el latido llega siempre que haya internet.
+	// La observacion del vecino de LAN viaja TAMBIEN por el latido, y ahi esta
+	// la gracia: cuando el vecino cae, se lleva el gossip con el —nadie mas
+	// comparte su LAN—, asi que el latido es la UNICA via por la que puede
+	// llegar "lo veo" o "no lo veo".
+	//
+	// Y es la diferencia entre dos diagnosticos que desde fuera se parecen:
+	// "no reporta y su vecino tampoco lo ve" = apagado, hay que ir; "no reporta
+	// pero su vecino SI lo ve" = encendido y sin internet, no hay que ir.
+	if cfg.LANPeer != "" {
+		lanState.mu.RLock()
+		visto, cuando := lanState.reachable, lanState.checkedAt
+		lanState.mu.RUnlock()
+		if cuando > 0 {
+			form.Set("lan_peer", lanPeerNode(cfg))
+			if visto {
+				form.Set("lan_peer_ok", "1")
+			} else {
+				form.Set("lan_peer_ok", "0")
+			}
+		}
+	}
 	if r, ok := store.Head(cfg.Node); ok {
 		if r.SSID != "" {
 			form.Set("ssid", r.SSID)
