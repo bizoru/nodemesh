@@ -51,6 +51,17 @@ type Config struct {
 	// say "alive on the LAN, just off the tailnet" instead of just "gone".
 	// No credentials involved: a plain ICMP ping, not an API call.
 	LANPeer string `json:"lanPeer,omitempty"`
+	// LANPeerIP/LANPeerMAC: direccion del vecino y su MAC. Se separan del
+	// NOMBRE a proposito — `lanPeer` sigue siendo quien es, esto es donde
+	// esta. Hicieron falta el 2026-09-21: athena volvio de un apagon con
+	// .92 en vez de .93 y se llevo por delante todo lo que la nombraba por
+	// direccion. Con la MAC, el sondeo la vuelve a encontrar sola.
+	//
+	// En Windows el sondeo va por ARP, no por ping: el firewall de athena
+	// descarta ICMP, pero ARP lo contesta la pila por debajo del filtro, asi
+	// que una maquina encendida SIEMPRE responde. Ver arp_windows.go.
+	LANPeerIP  string `json:"lanPeerIP,omitempty"`
+	LANPeerMAC string `json:"lanPeerMAC,omitempty"`
 	// TSIP: dirección de Tailscale fijada a mano, para hosts donde no se puede
 	// autodetectar. Sólo hace falta en Android/Termux: allí no hay
 	// CLI de Tailscale y el sandbox de la app deja net.InterfaceAddrs() vacío,
@@ -102,6 +113,14 @@ type Config struct {
 	HeartbeatURL   string `json:"heartbeatURL,omitempty"`
 	HeartbeatToken string `json:"heartbeatToken,omitempty"`
 	HeartbeatSecs  int    `json:"heartbeatSecs,omitempty"`
+	// PublicIPURL: endpoint que devuelve la IP desde la que nos ve
+	// (el /ip del colector). Vacío = no se consulta.
+	//
+	// Hace falta aparte del latido porque el latido va por MagicDNS mientras
+	// el tailnet esté sano, y entonces el colector nos ve con la 100.x del
+	// tailnet, que no ubica nada. Solo se pone en los nodos donde la
+	// ubicación por SSID o por router no llega — hoy, el R1.
+	PublicIPURL string `json:"publicIPURL,omitempty"`
 	// ForgetNodes: nombres de nodos DADOS DE BAJA. nodemesh los ignora aunque un
 	// peer se los ofrezca por gossip, no los muestra en /api/nodes, y borra su log
 	// al arrancar. Necesario porque el gossip re-descubre nodos de los peers, así
@@ -110,6 +129,15 @@ type Config struct {
 	// nodo caído que vuelve con el log viejo). Hoy lleva "bga-mbp-i9", la
 	// máquina de Bucaramanga que Steven borró del tailnet el 2026-09-09.
 	ForgetNodes []string `json:"forgetNodes,omitempty"`
+	// Placement: dónde está ESTE nodo. Cada uno declara solo lo suyo y el dato
+	// viaja por gossip, al revés que el mapa `locations` de abajo, que había
+	// que replicar en los trece ficheros —y por eso cuatro nodos llevaban
+	// meses saliendo con "?". Ver placement.go.
+	Placement *Placement `json:"placement,omitempty"`
+	// Sites: catálogo de sedes escrito a mano. Solo hace falta sembrar los
+	// SSID; el resto de la huella (MAC del router, prefijo público, subred) la
+	// levantan solos los nodos que ya saben dónde están.
+	Sites map[string]Site `json:"sites,omitempty"`
 }
 
 func loadConfig(path string) (*Config, error) {
@@ -654,9 +682,124 @@ func pingHost(host string) bool {
 	default:
 		args = []string{"-n", "2", host}
 	}
+	// En Android NO se lanza nada. Poner la ruta absoluta no bastó: el
+	// proceso sigue muriendo con SIGSYS al ejecutar el ping de Termux
+	// —comprobado en el R1, crash-loop cada 40 s con el volcado de registros
+	// deletreando .../usr/bin/ping—. Aquí no hay medias tintas: en ese
+	// aparato, todo servicio de larga vida que quiera seguir vivo no
+	// ejecuta procesos.
+	if esAndroid() {
+		return false
+	}
+	bin := rutaPing()
+	if bin == "" {
+		return false
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
-	return exec.CommandContext(ctx, "ping", args...).Run() == nil
+	return exec.CommandContext(ctx, bin, args...).Run() == nil
+}
+
+// rutaPing busca el binario por rutas absolutas en vez de dejar que exec lo
+// resuelva por PATH.
+//
+// No es manía: LookPath usa faccessat2, syscall que el seccomp de Android
+// BLOQUEA, y el proceso muere entero con SIGSYS —incapturable— para que el
+// supervisor lo reviva y vuelva a morir a la siguiente vuelta. El sitio donde
+// esto iba a doler es justo el nuevo: el R1 ubicándose por ping al vecino de
+// LAN. os.Stat sí está permitido.
+var pingCandidatos = []string{
+	"/system/bin/ping",                         // Android
+	"/data/data/com.termux/files/usr/bin/ping", // Termux
+	"/bin/ping", "/usr/bin/ping", "/sbin/ping", "/usr/sbin/ping",
+	`C:\Windows\System32\PING.EXE`,
+}
+
+// esAndroid distingue Android de un Linux normal, que para Go son el mismo
+// GOOS. Se mira un fichero del sistema, no una variable de entorno: nodemesh
+// arranca desde un supervisor sin sesión y el entorno allí no dice nada.
+var android = struct {
+	sync.Once
+	v bool
+}{}
+
+func esAndroid() bool {
+	android.Do(func() {
+		for _, c := range []string{"/system/bin/app_process", "/system/build.prop"} {
+			if _, err := os.Stat(c); err == nil {
+				android.v = true
+				return
+			}
+		}
+	})
+	return android.v
+}
+
+var pingBin = struct {
+	sync.Once
+	v string
+}{}
+
+func rutaPing() string {
+	pingBin.Do(func() {
+		for _, c := range pingCandidatos {
+			if st, err := os.Stat(c); err == nil && !st.IsDir() {
+				pingBin.v = c
+				return
+			}
+		}
+		// Ningún candidato: se deja vacío y pingHost devuelve false. Mejor
+		// perder la señal que arriesgarse a un PATH que mata el proceso.
+	})
+	return pingBin.v
+}
+
+// vecinoLAN guarda la direccion con la que se esta sondeando al vecino: puede
+// no ser la de la config si el DHCP lo movio y hubo que buscarlo por MAC.
+var vecinoLAN struct {
+	mu        sync.Mutex
+	ip        string
+	ultimaFue int64 // epoch del ultimo barrido por MAC, para no repetirlo
+}
+
+// sondeaVecino dice si el vecino de LAN esta vivo, y por donde.
+//
+// Orden: ARP a la direccion conocida (definitivo y barato) -> si falla y
+// tenemos su MAC, barrer la subred por si el DHCP lo movio (caro: como mucho
+// cada 10 min) -> si no hay direccion, ping al nombre, que es lo que habia
+// antes y sigue valiendo donde el ping funciona.
+func sondeaVecino(cfg *Config) bool {
+	vecinoLAN.mu.Lock()
+	ip := vecinoLAN.ip
+	if ip == "" {
+		ip = cfg.LANPeerIP
+	}
+	ultima := vecinoLAN.ultimaFue
+	vecinoLAN.mu.Unlock()
+
+	if ip != "" {
+		if dir := net.ParseIP(ip); dir != nil {
+			if mac := alcanzaPorARP(dir); mac != "" {
+				return true
+			}
+			// No contesta ahi. Puede estar apagado... o haberse movido.
+			ahora := time.Now().Unix()
+			if cfg.LANPeerMAC != "" && ahora-ultima > 600 {
+				vecinoLAN.mu.Lock()
+				vecinoLAN.ultimaFue = ahora
+				vecinoLAN.mu.Unlock()
+				if nueva := buscaPorMAC(dir, cfg.LANPeerMAC); nueva != "" {
+					log.Printf("vecino %s se movio a %s (encontrado por MAC %s)", cfg.LANPeer, nueva, cfg.LANPeerMAC)
+					vecinoLAN.mu.Lock()
+					vecinoLAN.ip = nueva
+					vecinoLAN.mu.Unlock()
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return pingHost(cfg.LANPeer)
 }
 
 // lanPeerLoop pings cfg.LANPeer on the same cadence as the collector, so a
@@ -668,7 +811,7 @@ func lanPeerLoop(cfg *Config) {
 	var since int64
 	var last = -1 // -1: todavía no hay ninguna medición
 	for {
-		ok := pingHost(cfg.LANPeer)
+		ok := sondeaVecino(cfg)
 		now := time.Now().Unix()
 		if cur := b2i(ok); cur != last {
 			since = now // el resultado cambió: empieza a contar de nuevo
@@ -772,6 +915,13 @@ type nodeInfo struct {
 	LANCheck     *LANCheck     `json:"lanCheck,omitempty"`     // only set by whichever node actually checked
 	BLECheck     *BLECheck     `json:"bleCheck,omitempty"`     // only set by whichever node actually checked
 	Specs        *Specs        `json:"specs,omitempty"`        // propios o aprendidos por gossip (ver specs.go)
+	// Placement: sitio ya resuelto y de dónde salió el dato. Se relaya como
+	// los specs (lleva UpdatedAt). Ver placement.go.
+	Placement *PlacementInfo `json:"placement,omitempty"`
+	// Gateway: MAC del router de ESTE nodo. Primera mano, nunca se relaya —
+	// no dice nada de un tercero. Se publica para poder diagnosticar por qué
+	// un nodo se ubicó donde se ubicó.
+	Gateway string `json:"gateway,omitempty"`
 }
 
 // Versiones de los pares, aprendidas en cada ronda de gossip al leer su
@@ -861,6 +1011,7 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			// que un nodo conozca la flota entera aunque no llegue a todos.
 			if n != cfg.Node {
 				setPeerSpecs(n, info.Specs)
+				setPeerPlacement(n, info.Placement)
 				// Mismo trato para las observaciones directas, y por el mismo
 				// motivo: llevan timestamp, así que la copia rancia se
 				// descarta sola. Es lo que hace que el ping de LAN de un nodo a
@@ -868,6 +1019,18 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 				setPeerChecks(n, peerNodeName(infos, ip), info.LANCheck, info.BLECheck)
 			}
 		}
+		// El catálogo de sedes y las huellas aprendidas viajan como todo lo
+		// demás: quien levantó una huella desde un sitio que conocía con
+		// certeza se la pasa al resto, y así un nodo que llega sin SSID puede
+		// ubicarse con lo que aprendieron otros.
+		var sedes struct {
+			Catalog map[string]Site   `json:"catalog"`
+			Learned []huellaAprendida `json:"learned"`
+		}
+		if err := getJSON(client, base+"/api/sites", &sedes); err == nil {
+			mezclaSitios(sedes.Catalog, sedes.Learned)
+		}
+
 		// pull chain extensions for every known node
 		for n := range known {
 			if n == cfg.Node {
@@ -947,9 +1110,21 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 			info.Version = version
 			s := localSpecs()
 			info.Specs = &s
+			info.Placement = placementPropio()
+			info.Gateway = gatewayActual()
 		} else {
 			info.Version = getPeerVersion(n)
 			info.Specs = getPeerSpecs(n)
+			info.Placement = getPeerPlacement(n)
+		}
+		// `location` se sigue rellenando: el visor del R1 y meshflow leen ese
+		// campo, no el objeto nuevo. Sale del placement cuando lo hay y del
+		// mapa viejo cuando no, que es lo que hace que la migración pueda ser
+		// nodo a nodo en vez de un día de corte.
+		if info.Placement != nil {
+			if et := etiquetaSitio(*info.Placement); et != "" {
+				info.Location = et
+			}
 		}
 		out[n] = info
 	}
@@ -967,8 +1142,17 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 	return out
 }
 
+// configPath: dónde está el fichero que se reescribe al cambiar el placement
+// en caliente. Lo fija main(); vive aquí porque newMux no lo recibe y pasarlo
+// por toda la cadena solo para esto no compensa.
+var configPath string
+
 func newMux(cfg *Config, store *Store) *http.ServeMux {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/placement", func(w http.ResponseWriter, r *http.Request) {
+		handlePlacement(w, r, cfg, configPath)
+	})
+	mux.HandleFunc("/api/sites", handleSites)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
 			http.NotFound(w, r)
@@ -1148,11 +1332,15 @@ func main() {
 	if err != nil {
 		log.Fatalf("config: %v", err)
 	}
+	configPath = *cfgPath
 	store, err := openStore(cfg.DataDir)
 	if err != nil {
 		log.Fatalf("store: %v", err)
 	}
 	specsDiskPath = cfg.DataDir // el disco que se reporta es donde escribimos
+	nodoLocal = cfg.Node
+	cargaSitios(cfg)
+	fijaDeclaracion(cfg.Placement)
 	log.Printf("nodemesh starting: node=%s port=%d peers=%v", cfg.Node, cfg.Port, cfg.Peers)
 
 	// collector loop
@@ -1160,6 +1348,35 @@ func main() {
 		heartbeat := int64(600)
 		for {
 			r := collect(cfg)
+			// El vecindario, antes de resolver: quién hay en la flota, con
+			// qué IP de LAN y dónde dice estar. De ahí sale el ping que ubica
+			// a los nodos a los que el sistema no les deja leer nada.
+			vs := []vecino{}
+			for _, n := range store.Nodes() {
+				if n == cfg.Node || forgottenNodes[n] {
+					continue
+				}
+				head, ok := store.Head(n)
+				if !ok || head.LocalIP == "" {
+					continue
+				}
+				p := getPeerPlacement(n)
+				if p == nil {
+					continue
+				}
+				vs = append(vs, vecino{Nombre: n, LocalIP: head.LocalIP,
+					Sitio: p.Site, Fuente: p.Source})
+			}
+			fijaVecinos(vs)
+			// El sitio se recalcula con lo que se acaba de medir, no con lo
+			// que se midió al arrancar: si alguien se lleva el portátil a la
+			// otra sede, la vuelta siguiente ya lo dice.
+			refrescaPropio(señales{
+				SSID:     r.SSID,
+				LocalIP:  r.LocalIP,
+				Gateway:  gatewayActual(),
+				PublicIP: ipPublicaActual(),
+			})
 			head, ok := store.Head(cfg.Node)
 			if !ok || !sameStatus(head, r) || r.TS-head.TS >= heartbeat {
 				r.Seq = 1
@@ -1190,7 +1407,10 @@ func main() {
 	// BLE beacon state watch loop (only when BLEStatePath is set — see Config)
 	go bleWatchLoop(cfg)
 	// heartbeat push a endpoint público (solo si HeartbeatURL está puesto)
-	go heartbeatLoop(cfg)
+	go heartbeatLoop(cfg, store)
+	// IP pública propia (solo si PublicIPURL está puesto): es lo que ubica a
+	// los nodos a los que el sistema les esconde el SSID y la tabla ARP.
+	go ipPublicaLoop(cfg)
 
 	mux := newMux(cfg, store)
 	go serveOn("127.0.0.1:"+fmt.Sprint(cfg.Port), mux)
