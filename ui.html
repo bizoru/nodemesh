@@ -124,6 +124,19 @@ const fmtBps = k => k >= 1000 ? (k/1000).toFixed(1)+" Mb/s" : Math.round(k)+" kb
 // flechas son tráfico observado, no un speedtest — aquí no se mide activamente.
 // El pico se etiqueta "al menos" porque eso es literalmente lo que demuestra:
 // un piso, no un techo.
+// Windows nombra las interfaces con la descripcion completa del adaptador
+// ("Killer(R) Wi-Fi 6 AX1650s 160MHz Wireless Network Adapter (201D2W)"), que
+// parte la tarjeta en dos lineas y entierra el dato. Se recorta para mostrar,
+// con el nombre entero en el tooltip; la API y /metrics siguen dando el
+// completo, que es el que identifica de verdad la tarjeta.
+function ifaceCorto(nombre) {
+  const limpio = nombre
+    .replace(/\s*\((R|TM)\)/g, "")
+    .replace(/\s*(Wireless )?Network Adapter.*$/i, "")
+    .trim();
+  return limpio.length > 30 ? limpio.slice(0, 29) + "\u2026" : limpio;
+}
+
 function netBlock(n) {
   const w = n.specs && n.specs.net;
   if (!w) return "";
@@ -132,8 +145,9 @@ function netBlock(n) {
   if (w.rssi) bits.push(`señal ${w.rssi} dBm`);
   if (w.windowSec) bits.push(`↓ ${fmtBps(w.rxKbps)} ↑ ${fmtBps(w.txKbps)}`);
   if (w.rxPeakKbps) bits.push(`<span title="mayor tasa observada desde que arrancó el proceso: demuestra un piso, no un techo">pico ≥ ${fmtBps(w.rxPeakKbps)}</span>`);
-  if (!bits.length) return `<br>red: ${w.iface} — el sistema no publica velocidad`;
-  return `<br>red ${w.iface}: ${bits.join(" · ")}`;
+  const nom = `<span title="${w.iface}">${ifaceCorto(w.iface)}</span>`;
+  if (!bits.length) return `<br>red: ${nom} — el sistema no publica velocidad`;
+  return `<br>red ${nom}: ${bits.join(" · ")}`;
 }
 
 // specsBlock: lo que hasta ahora había que ir a sacar con ssh nodo por nodo.
