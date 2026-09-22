@@ -2,12 +2,12 @@ package main
 
 import (
 	"strings"
-	"syscall"
 	"unsafe"
 )
 
+// iphlpapi ya esta declarado en arp_windows.go (mismo paquete), igual que
+// kernel32 lo esta en uptime_windows.go.
 var (
-	iphlpapi             = syscall.NewLazyDLL("iphlpapi.dll")
 	procGetBestInterface = iphlpapi.NewProc("GetBestInterface")
 	procGetIfEntry       = iphlpapi.NewProc("GetIfEntry")
 )
