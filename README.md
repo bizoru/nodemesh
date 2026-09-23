@@ -240,13 +240,28 @@ Where each number comes from, per platform:
 | Windows | `GetIfEntry` (`dwSpeed`) | `GetIfEntry` (`dwInOctets`/`dwOutOctets`) | — |
 
 **Android reports nothing at all, and cannot.** On the R1 (CipherOS + Termux,
-unrooted) SELinux denies `/proc/net/route`, `/proc/net/wireless` and the whole
-of `/sys/class/net/` — not just the wifi bits, the directory itself. There is
-no interface to identify and no counter to read, so `specs.net` is simply
-absent there. That is the honest answer rather than a bug to chase: every other
-Linux node reads these files fine, and the same binary asks for the same files
-on the R1 and is refused. Short of running nodemesh as root on that device,
-which is not worth it for this, the R1 stays out of this feature.
+unrooted) `specs.net` is simply absent. Both ways in are closed, and both were
+measured on the device rather than assumed:
+
+| Route | Result on the R1 |
+|---|---|
+| `/proc/net/route`, `/proc/net/dev`, `/proc/net/wireless` | permission denied |
+| `/sys/class/net/` | permission denied — the directory itself, not just the wifi entries |
+| `net.Interfaces()`, `net.InterfaceAddrs()` | `netlinkrib: permission denied` |
+| `bind()` on a raw `NETLINK_ROUTE` socket | permission denied |
+| `net.Dial` to get the outbound IP | **works** — this is why `localIP` is correct there |
+
+That last row is the whole shape of it: the node knows its own address but
+cannot name the interface it left by, and cannot read a byte counter by any
+route. Netlink is worth calling out because it is the obvious fallback when
+`/proc` is closed — modern Android blocks it for unprivileged apps precisely to
+stop that end-run, so `net.Interfaces()` returning nothing on this device is
+not a bug to work around.
+
+Guessing was considered and rejected: a private LAN address could be *assumed*
+to be wifi, but inventing a value is worse than an absent one — the same call
+`placement` makes when it answers `homebase` instead of a site it cannot prove.
+Short of running nodemesh as root there, the R1 stays out of this feature.
 
 Linux stays at **zero `exec`**, for the reason given above — which is why wifi
 rate comes from the old Wireless Extensions ioctl instead of `iw dev X link`:
