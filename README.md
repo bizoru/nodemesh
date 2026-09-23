@@ -239,6 +239,15 @@ Where each number comes from, per platform:
 | macOS | `ifconfig` media, or `wdutil` when root (wifi rate + RSSI) | `netstat -ibn` | `wdutil`, root only |
 | Windows | `GetIfEntry` (`dwSpeed`) | `GetIfEntry` (`dwInOctets`/`dwOutOctets`) | — |
 
+**Android reports nothing at all, and cannot.** On the R1 (CipherOS + Termux,
+unrooted) SELinux denies `/proc/net/route`, `/proc/net/wireless` and the whole
+of `/sys/class/net/` — not just the wifi bits, the directory itself. There is
+no interface to identify and no counter to read, so `specs.net` is simply
+absent there. That is the honest answer rather than a bug to chase: every other
+Linux node reads these files fine, and the same binary asks for the same files
+on the R1 and is refused. Short of running nodemesh as root on that device,
+which is not worth it for this, the R1 stays out of this feature.
+
 Linux stays at **zero `exec`**, for the reason given above — which is why wifi
 rate comes from the old Wireless Extensions ioctl instead of `iw dev X link`:
 an ioctl on an already-open socket never reaches `faccessat2`. Windows pays
