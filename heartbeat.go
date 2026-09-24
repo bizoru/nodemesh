@@ -32,13 +32,47 @@ func heartbeatLoop(cfg *Config, store *Store) {
 		interval = 60
 	}
 	client := &http.Client{Timeout: 15 * time.Second}
+	var caidoDesde time.Time
+	var ultimoLog time.Time
+	espera := 0
 	for {
-		sendHeartbeat(cfg, store, client)
-		time.Sleep(time.Duration(interval) * time.Second)
+		err := sendHeartbeat(cfg, store, client)
+		if err == nil {
+			if !caidoDesde.IsZero() {
+				log.Printf("heartbeat: vuelve a llegar tras %s sin latido", time.Since(caidoDesde).Round(time.Second))
+				caidoDesde = time.Time{}
+			}
+			espera = 0
+			time.Sleep(time.Duration(interval) * time.Second)
+			continue
+		}
+		// Un latido fallido no espera la vuelta entera: tras un cambio de red
+		// (wifi que salta de banda, reconexión) la conexión vieja puede quedar
+		// muerta y esperar 60 s más por intento convertía un corte de segundos
+		// en minutos sin latido —y en una alerta falsa del dead-man—. Se
+		// descartan las conexiones reutilizables y se reintenta a los 10 s,
+		// doblando hasta la cadencia normal.
+		client.CloseIdleConnections()
+		if caidoDesde.IsZero() {
+			caidoDesde = time.Now()
+		}
+		// Se registra el primer fallo y luego uno cada 10 min: sin esto, el
+		// 2026-09-24 x1-nano estuvo 14 min con internet y sin latido y no quedó
+		// rastro de por qué.
+		if time.Since(ultimoLog) > 10*time.Minute {
+			log.Printf("heartbeat: no llega a %s: %v", cfg.HeartbeatURL, err)
+			ultimoLog = time.Now()
+		}
+		if espera == 0 {
+			espera = 10
+		} else if espera *= 2; espera > interval {
+			espera = interval
+		}
+		time.Sleep(time.Duration(espera) * time.Second)
 	}
 }
 
-func sendHeartbeat(cfg *Config, store *Store, client *http.Client) {
+func sendHeartbeat(cfg *Config, store *Store, client *http.Client) error {
 	form := url.Values{}
 	form.Set("node", cfg.Node)
 	form.Set("token", cfg.HeartbeatToken)
@@ -100,9 +134,7 @@ func sendHeartbeat(cfg *Config, store *Store, client *http.Client) {
 	}
 	resp, err := client.PostForm(cfg.HeartbeatURL, form)
 	if err != nil {
-		// silencioso salvo debug: un latido perdido no es un error del nodo,
-		// es justo lo que el colector detecta.
-		return
+		return err
 	}
 	// El colector contesta con la IP desde la que nos vio salir. Es la única
 	// vía para conocer la IP pública propia SIN preguntarle a un servicio de
@@ -115,10 +147,10 @@ func sendHeartbeat(cfg *Config, store *Store, client *http.Client) {
 	cuerpo, _ := io.ReadAll(io.LimitReader(resp.Body, 128))
 	resp.Body.Close()
 	if resp.StatusCode >= 400 {
-		log.Printf("heartbeat: %s respondió %d", cfg.HeartbeatURL, resp.StatusCode)
-		return
+		return fmt.Errorf("respondió %d", resp.StatusCode)
 	}
 	for _, campo := range strings.Fields(string(cuerpo)) {
 		fijaIPPublica(campo)
 	}
+	return nil
 }
