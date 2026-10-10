@@ -101,6 +101,25 @@ type NodeState struct {
 	// puede falsear sin cambiar de red de verdad. Sirve para ubicar al nodo
 	// por prefijo cuando su sistema le esconde el SSID.
 	PublicIP string `json:"public_ip,omitempty"`
+	// TSIP: dirección del nodo en el tailnet (CGNAT 100.x). Lo manda el nodo
+	// porque un host puede estar vivo con Tailscale backend Stopped y aquí
+	// se queda "" — señal clara de "el tailnet se cayó aunque el host vive".
+	TSIP string `json:"ts_ip,omitempty"`
+	// TailscaleState: BackendState devuelto por `tailscale status --json`
+	// (Running / Stopped / NeedsLogin / NoState / Starting). Vacío si el nodo
+	// no tiene Tailscale instalado. Permite distinguir "no reporta porque la
+	// máquina se cayó" de "no reporta porque Tailscale backend está Stopped
+	// pero la máquina está viva en la LAN". MCL postmortem mini 9/10-oct-2026.
+	TailscaleState string `json:"tailscale_state,omitempty"`
+	// LimaVMs: "nombre:estado[,nombre:estado…]" de todas las VMs Lima del
+	// host (hoy mini y lia). Alerta cuando una VM queda Broken aunque el
+	// host siga pulsando — gap que dejó al descubierto el incidente mini
+	// del 9-oct-2026.
+	LimaVMs string `json:"lima_vms,omitempty"`
+	// MAC: MAC de la interfaz default. Puede cambiar entre reboots (Private
+	// WiFi Address, randomización); el latido la refresca para que el rescate
+	// por LAN no empiece con un dato obsoleto de una nota desactualizada.
+	MAC string `json:"mac,omitempty"`
 }
 type State struct {
 	mu    sync.Mutex
@@ -280,6 +299,20 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("net_type"); v != "" {
 		ns.NetType = v
 	}
+	// Campos de supervisión añadidos tras el postmortem mini 9/10-oct-2026.
+	// Misma regla: vacío NO pisa, así los binarios viejos y nuevos conviven.
+	if v := r.FormValue("ts_ip"); v != "" {
+		ns.TSIP = v
+	}
+	if v := r.FormValue("tailscale_state"); v != "" {
+		ns.TailscaleState = v
+	}
+	if v := r.FormValue("lima_vms"); v != "" {
+		ns.LimaVMs = v
+	}
+	if v := r.FormValue("mac"); v != "" {
+		ns.MAC = v
+	}
 	state.mu.Unlock()
 	switch {
 	case volvioDeMantenimiento:
@@ -429,13 +462,51 @@ func redInfoSuffix(ns *NodeState) string {
 	if ns.LocalIP != "" {
 		partes = append(partes, ns.LocalIP)
 	}
+	if ns.MAC != "" {
+		// MAC junto a la IP local: eso es lo que necesita quien busca al
+		// nodo por LAN cuando pierde tailnet. Antes había que ir a la nota
+		// del nodo y rezar que estuviera al día; ahora el latido la refresca.
+		partes = append(partes, "mac "+ns.MAC)
+	}
 	if ns.PublicIP != "" {
 		partes = append(partes, "salida "+ns.PublicIP)
+	}
+	if ns.TSIP != "" {
+		partes = append(partes, "tailnet "+ns.TSIP)
 	}
 	if len(partes) == 0 {
 		return ""
 	}
 	return fmt.Sprintf(" Última red conocida: %s.", strings.Join(partes, " · "))
+}
+
+// supervisionSuffix dice en qué estado estaban las piezas que un host-vivo
+// con backend-caído deja invisibles al dead-man clásico: Tailscale backend y
+// VMs Lima. Vacío si no hay dato (binarios viejos). Se concatena a la alerta
+// de dead-man y a la de recuperación — la causa posible cuenta más que el
+// hecho de que no reporte.
+func supervisionSuffix(ns *NodeState) string {
+	partes := []string{}
+	if ns.TailscaleState != "" && ns.TailscaleState != "Running" {
+		partes = append(partes, "tailscale="+ns.TailscaleState)
+	}
+	if ns.LimaVMs != "" {
+		// Si TODAS las VMs están Running, no hacemos ruido; si alguna no lo
+		// está, se lista entera (nombre:estado es ya legible).
+		anomalas := []string{}
+		for _, vm := range strings.Split(ns.LimaVMs, ",") {
+			if _, estado, ok := strings.Cut(vm, ":"); ok && estado != "Running" {
+				anomalas = append(anomalas, vm)
+			}
+		}
+		if len(anomalas) > 0 {
+			partes = append(partes, "lima="+strings.Join(anomalas, ","))
+		}
+	}
+	if len(partes) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" Supervisión al callarse: %s.", strings.Join(partes, " · "))
 }
 
 func memInfoSuffix(ns *NodeState) string {
@@ -478,7 +549,7 @@ func deadManLoop() {
 					mins := silent / 60
 					// MCL-199: la memoria de justo antes de callarse, para que
 					// la alerta diagnostique en vez de solo constatar.
-					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s%s%s", node, mins, testigoSuffix(node), redInfoSuffix(ns), memInfoSuffix(ns)))
+					avisar(fmt.Sprintf("🔴 heartbeat: %s no reporta hace %d min (posible caída o sin internet).%s%s%s%s", node, mins, testigoSuffix(node), redInfoSuffix(ns), supervisionSuffix(ns), memInfoSuffix(ns)))
 					ns.Down = true
 					ns.LastAlert = now
 				}

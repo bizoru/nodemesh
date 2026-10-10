@@ -131,6 +131,27 @@ func sendHeartbeat(cfg *Config, store *Store, client *http.Client) error {
 		if r.NetType != "" {
 			form.Set("net_type", r.NetType)
 		}
+		if r.TSIP != "" {
+			form.Set("ts_ip", r.TSIP)
+		}
+	}
+	// Supervisión (MCL-postmortem mini 9/10-oct-2026): el host puede estar
+	// perfectamente vivo mientras lo que importa está roto (Tailscale backend
+	// Stopped, VM Lima Broken). Antes el latido solo probaba que el proceso
+	// nodemesh seguía corriendo; ahora reporta estado para que el collector
+	// pueda alertar con causa en vez de solo constatar silencio.
+	if ts := tailscaleBackend(); ts != "" {
+		form.Set("tailscale_state", ts)
+	}
+	if vms := limaVMs(); vms != "" {
+		form.Set("lima_vms", vms)
+	}
+	// MAC de la interfaz default. Viaja porque PUEDE CAMBIAR (Private WiFi
+	// Address, randomización) y una nota con MAC vieja hace fallar la
+	// búsqueda en LAN cuando el nodo pierde tailnet. El collector guarda la
+	// última conocida y la sirve en /api/nodes para rescates.
+	if mac := localMAC(); mac != "" {
+		form.Set("mac", mac)
 	}
 	resp, err := client.PostForm(cfg.HeartbeatURL, form)
 	if err != nil {
