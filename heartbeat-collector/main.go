@@ -120,6 +120,13 @@ type NodeState struct {
 	// WiFi Address, randomización); el latido la refresca para que el rescate
 	// por LAN no empiece con un dato obsoleto de una nota desactualizada.
 	MAC string `json:"mac,omitempty"`
+	// Supervisión activa (Phase 2, 2026-10-13): cuando el nodo SÍ reporta pero
+	// supervisionDegradada(ns) devuelve no vacío, arrancamos un reloj y alertamos
+	// pasados 180 s si sigue degradado. Permite capturar "la máquina vive pero
+	// el servicio adentro está roto" que el dead-man clásico nunca ve.
+	DegradedSince        int64 `json:"degraded_since,omitempty"`
+	Degraded             bool  `json:"degraded,omitempty"`
+	LastSupervisionAlert int64 `json:"last_supervision_alert,omitempty"`
 }
 type State struct {
 	mu    sync.Mutex
@@ -480,19 +487,17 @@ func redInfoSuffix(ns *NodeState) string {
 	return fmt.Sprintf(" Última red conocida: %s.", strings.Join(partes, " · "))
 }
 
-// supervisionSuffix dice en qué estado estaban las piezas que un host-vivo
-// con backend-caído deja invisibles al dead-man clásico: Tailscale backend y
-// VMs Lima. Vacío si no hay dato (binarios viejos). Se concatena a la alerta
-// de dead-man y a la de recuperación — la causa posible cuenta más que el
-// hecho de que no reporte.
-func supervisionSuffix(ns *NodeState) string {
+// supervisionDegradada arma "tailscale=X · lima=k3s:Broken,…" si alguna pieza
+// supervisada no está Running. Vacío = todo en orden (o binario viejo que no
+// manda esos campos). Lo usan supervisionSuffix (para pegarlo al dead-man) y
+// el loop de supervisión activa (para decidir si abrir incidente de "vivo pero
+// roto adentro").
+func supervisionDegradada(ns *NodeState) string {
 	partes := []string{}
 	if ns.TailscaleState != "" && ns.TailscaleState != "Running" {
 		partes = append(partes, "tailscale="+ns.TailscaleState)
 	}
 	if ns.LimaVMs != "" {
-		// Si TODAS las VMs están Running, no hacemos ruido; si alguna no lo
-		// está, se lista entera (nombre:estado es ya legible).
 		anomalas := []string{}
 		for _, vm := range strings.Split(ns.LimaVMs, ",") {
 			if _, estado, ok := strings.Cut(vm, ":"); ok && estado != "Running" {
@@ -503,10 +508,20 @@ func supervisionSuffix(ns *NodeState) string {
 			partes = append(partes, "lima="+strings.Join(anomalas, ","))
 		}
 	}
-	if len(partes) == 0 {
+	return strings.Join(partes, " · ")
+}
+
+// supervisionSuffix dice en qué estado estaban las piezas que un host-vivo
+// con backend-caído deja invisibles al dead-man clásico: Tailscale backend y
+// VMs Lima. Vacío si no hay dato (binarios viejos). Se concatena a la alerta
+// de dead-man y a la de recuperación — la causa posible cuenta más que el
+// hecho de que no reporte.
+func supervisionSuffix(ns *NodeState) string {
+	d := supervisionDegradada(ns)
+	if d == "" {
 		return ""
 	}
-	return fmt.Sprintf(" Supervisión al callarse: %s.", strings.Join(partes, " · "))
+	return fmt.Sprintf(" Supervisión al callarse: %s.", d)
 }
 
 func memInfoSuffix(ns *NodeState) string {
@@ -553,6 +568,35 @@ func deadManLoop() {
 					ns.Down = true
 					ns.LastAlert = now
 				}
+				// Nodo callado: no evaluamos supervisión activa — el dead-man ya
+				// está cantando y el supervisionSuffix de arriba lleva la causa.
+				// Mantenemos DegradedSince para que al volver, si ya era un
+				// degraded abierto, no se pierda la continuidad.
+				continue
+			}
+			// Phase 2 (2026-10-13): supervisión activa. El host SÍ reporta, pero
+			// algo adentro puede estar caído (tailscale Stopped, Lima VM Broken).
+			// Esperamos 180 s con el reloj para no ladrar en reinicios normales.
+			if deg := supervisionDegradada(ns); deg != "" {
+				if ns.DegradedSince == 0 {
+					ns.DegradedSince = now
+				}
+				if now-ns.DegradedSince >= 180 && (!ns.Degraded || now-ns.LastSupervisionAlert >= realert) {
+					mins := (now - ns.DegradedSince) / 60
+					avisar(fmt.Sprintf("🟠 heartbeat: %s vivo pero supervisión degradada hace %d min: %s.%s", node, mins, deg, redInfoSuffix(ns)))
+					ns.Degraded = true
+					ns.LastSupervisionAlert = now
+				}
+			} else if ns.Degraded {
+				// Ya volvió todo a Running: cerramos el incidente.
+				avisar(fmt.Sprintf("✅ heartbeat: %s recuperó supervisión (tailscale/lima en Running).", node))
+				ns.Degraded = false
+				ns.DegradedSince = 0
+				ns.LastSupervisionAlert = 0
+			} else if ns.DegradedSince != 0 {
+				// Degradado se vio pero nunca llegó a alertar (duró < 180 s).
+				// Reset silencioso del reloj.
+				ns.DegradedSince = 0
 			}
 		}
 		state.mu.Unlock()
