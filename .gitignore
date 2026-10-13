@@ -3,3 +3,4 @@ data/
 nodemesh
 nodemesh.json
 *.exe
+heartbeat-collector/heartbeat-collector
