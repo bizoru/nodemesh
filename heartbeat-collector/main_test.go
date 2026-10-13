@@ -51,6 +51,44 @@ func TestMemInfoSuffixSinDatos(t *testing.T) {
 	}
 }
 
+// Phase 2: supervisionDegradada es el motor que decide si abrir incidente de
+// "host vivo pero servicio adentro roto". Tiene que detectar tailscale Stopped
+// y VMs Lima no-Running, listar SOLO las anómalas, y quedar vacío cuando todo
+// está Running o el binario viejo no manda los campos.
+func TestSupervisionDegradadaDetectaCadaCaso(t *testing.T) {
+	casos := []struct {
+		nombre string
+		ns     NodeState
+		want   string
+	}{
+		{"binario viejo", NodeState{}, ""},
+		{"todo running", NodeState{TailscaleState: "Running", LimaVMs: "k3s:Running"}, ""},
+		{"tailscale stopped", NodeState{TailscaleState: "Stopped", LimaVMs: "k3s:Running"}, "tailscale=Stopped"},
+		{"lima broken", NodeState{TailscaleState: "Running", LimaVMs: "k3s:Broken"}, "lima=k3s:Broken"},
+		{"ambas rotas", NodeState{TailscaleState: "NeedsLogin", LimaVMs: "k3s:Broken"}, "tailscale=NeedsLogin · lima=k3s:Broken"},
+		{"una vm sana y otra no", NodeState{LimaVMs: "k3s:Running,dev:Stopped"}, "lima=dev:Stopped"},
+	}
+	for _, c := range casos {
+		if got := supervisionDegradada(&c.ns); got != c.want {
+			t.Errorf("%s: supervisionDegradada() = %q, want %q", c.nombre, got, c.want)
+		}
+	}
+}
+
+// El supervisionSuffix queda estable (lo lee el dead-man): si degradada está
+// vacía el suffix tiene que seguir vacío, y con contenido tiene que envolver
+// con "Supervisión al callarse:" para no romper el formato de la alerta.
+func TestSupervisionSuffixEnvuelveSoloCuandoHayAlgo(t *testing.T) {
+	if got := supervisionSuffix(&NodeState{}); got != "" {
+		t.Errorf("sin datos deberia ser vacio, got %q", got)
+	}
+	got := supervisionSuffix(&NodeState{TailscaleState: "Stopped"})
+	want := " Supervisión al callarse: tailscale=Stopped."
+	if got != want {
+		t.Errorf("supervisionSuffix() = %q, want %q", got, want)
+	}
+}
+
 // Una parada anunciada silencia el silencio de ESE nodo y de ninguno mas, y se
 // acaba sola. Lo contrario —silenciar "hasta nuevo aviso"— es apagar el
 // vigilante y olvidarse de encenderlo, que es como se llega a no enterarse de
