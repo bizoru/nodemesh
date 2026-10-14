@@ -21,7 +21,7 @@
 set -euo pipefail
 
 if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
-  echo "corré con sudo" >&2
+  echo "ejecuta con sudo" >&2
   exit 1
 fi
 
@@ -63,5 +63,5 @@ echo "estado:"
 systemctl --no-pager --lines=0 status nodemesh.service || true
 
 echo
-echo "listo. verificá el latido desde el tailnet:"
+echo "listo. verifica el latido desde el tailnet:"
 echo "  ssh entry 'curl -fsS http://entry.ts.stevensierra.xyz:7777/api/nodes' | jq .rigby"
