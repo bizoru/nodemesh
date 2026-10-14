@@ -1,0 +1,14 @@
+{
+  "node": "rigby",
+  "port": 7777,
+  "peers": ["athena"],
+  "dataDir": "/var/lib/nodemesh",
+  "collectSecs": 60,
+  "gossipSecs": 120,
+  "locations": {
+    "rigby": "Socorro",
+    "athena": "Socorro"
+  },
+  "lanPeerIP": "192.168.101.92",
+  "bindIP": "192.168.101.88"
+}

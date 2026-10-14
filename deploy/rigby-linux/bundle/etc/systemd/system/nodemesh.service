@@ -1,0 +1,33 @@
+[Unit]
+Description=nodemesh (rigby, Socorro)
+Documentation=https://github.com/bizoru/nodemesh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/nodemesh -config /etc/nodemesh/nodemesh.json
+Restart=always
+RestartSec=10
+User=nodemesh
+Group=nodemesh
+StateDirectory=nodemesh
+WorkingDirectory=/var/lib/nodemesh
+
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+ReadWritePaths=/var/lib/nodemesh
+
+[Install]
+WantedBy=multi-user.target
