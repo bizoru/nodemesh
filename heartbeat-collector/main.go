@@ -128,6 +128,16 @@ type NodeState struct {
 	Degraded             bool  `json:"degraded,omitempty"`
 	LastSupervisionAlert int64 `json:"last_supervision_alert,omitempty"`
 }
+// Pulso: un latido registrado, con vía por la que llegó. Se guarda poco (solo
+// las ultimas 4 h) para poder dibujar "cuantos pulsos por nodo en el rato
+// reciente" sin pedirle a nadie que mire logs.
+type Pulso struct {
+	Ts  int64  `json:"ts"`
+	Via string `json:"via"` // "tailnet" o "funnel"
+}
+
+const pulsosVentanaSegs = 4 * 3600
+
 type State struct {
 	mu    sync.Mutex
 	Nodes map[string]*NodeState `json:"nodes"`
@@ -141,6 +151,27 @@ type State struct {
 	// reinicio del colector: una parada anunciada no puede volverse alerta
 	// porque el vigilante se reinicio en medio.
 	Mantenimiento map[string]int64 `json:"mantenimiento,omitempty"`
+	// Pulsos: ventana deslizante de los ultimos [pulsosVentanaSegs] s por nodo.
+	// Sobrevive a reinicios porque esta en el estado persistido. 11 nodos a
+	// 60 s = ~2640 entradas, trivial.
+	Pulsos map[string][]Pulso `json:"pulsos,omitempty"`
+}
+
+// clasificarVia dice por donde llego un POST segun la IP origen. Las IPs CGNAT
+// de Tailscale son 100.64.0.0/10 (y fd7a:115c:a1e0::/48 en IPv6). Todo lo
+// demas vino por el Funnel desde internet.
+func clasificarVia(ip string) string {
+	if strings.HasPrefix(ip, "100.") {
+		if parsed := net.ParseIP(ip); parsed != nil {
+			if b := parsed.To4(); b != nil && b[0] == 100 && b[1] >= 64 && b[1] <= 127 {
+				return "tailnet"
+			}
+		}
+	}
+	if strings.HasPrefix(ip, "fd7a:115c:a1e0") {
+		return "tailnet"
+	}
+	return "funnel"
 }
 
 // enMantenimiento dice si el silencio del nodo esta anunciado. El que llama
@@ -320,6 +351,20 @@ func handleHB(w http.ResponseWriter, r *http.Request) {
 	if v := r.FormValue("mac"); v != "" {
 		ns.MAC = v
 	}
+	// Pulsos: anotar y recortar los que caigan fuera de la ventana. Hecho
+	// bajo el mismo lock que la actualizacion del nodo para que /pulsos nunca
+	// vea una mitad coherente y la otra no.
+	if state.Pulsos == nil {
+		state.Pulsos = map[string][]Pulso{}
+	}
+	via := clasificarVia(ns.PublicIP)
+	ps := append(state.Pulsos[node], Pulso{Ts: now, Via: via})
+	cutoff := now - pulsosVentanaSegs
+	i := 0
+	for i < len(ps) && ps[i].Ts < cutoff {
+		i++
+	}
+	state.Pulsos[node] = ps[i:]
 	state.mu.Unlock()
 	switch {
 	case volvioDeMantenimiento:
@@ -428,6 +473,35 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 	// suelto que lea `.entry.last_seen_ago_s` no se entera del cambio. Lo
 	// nuevo va bajo una clave con guion bajo, que ningun nodo puede llamarse.
 	out["_canales"] = state.Canales
+	json.NewEncoder(w).Encode(out)
+}
+
+// handlePulsos devuelve las ultimas 4 h de latidos por nodo. Devuelve crudos
+// (ts epoch + via) para que el cliente los agrupe como le convenga. Un query
+// opcional `?desde=<epoch>` recorta a lo posterior.
+func handlePulsos(w http.ResponseWriter, r *http.Request) {
+	desde := int64(0)
+	fmt.Sscan(r.URL.Query().Get("desde"), &desde)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	w.Header().Set("Content-Type", "application/json")
+	out := map[string]any{
+		"ventana_segs": pulsosVentanaSegs,
+		"ahora":        time.Now().Unix(),
+		"nodos":        map[string][]Pulso{},
+	}
+	por_nodo := out["nodos"].(map[string][]Pulso)
+	for n, ps := range state.Pulsos {
+		if desde == 0 {
+			por_nodo[n] = ps
+			continue
+		}
+		i := 0
+		for i < len(ps) && ps[i].Ts < desde {
+			i++
+		}
+		por_nodo[n] = ps[i:]
+	}
 	json.NewEncoder(w).Encode(out)
 }
 
@@ -643,6 +717,7 @@ func main() {
 		fmt.Fprintln(w, ipDeOrigen(r))
 	})
 	http.HandleFunc("/status", handleStatus)
+	http.HandleFunc("/pulsos", handlePulsos)
 	http.HandleFunc("/mantenimiento", handleMantenimiento)
 	log.Printf("heartbeat-collector escuchando en %s", cfg.Listen)
 	log.Fatal(http.ListenAndServe(cfg.Listen, nil))
