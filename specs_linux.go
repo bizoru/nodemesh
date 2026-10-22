@@ -108,7 +108,43 @@ func cpuInfo() (model string, phys, logical int) {
 		cores[pkg+"/"+core] = true
 	}
 	delete(cores, "/")
+	// El "Hardware" de ARM es un codename seco ("MT6765") sin fabricante, y en
+	// el panel queda al lado de "Apple M4" o "12th Gen Intel Core i7-1255U". El
+	// device-tree publica "vendor,modelo" en texto plano, legible sin exec, y
+	// con eso se compone "Mediatek MT6765" en el mismo registro que los x86.
+	// En máquinas x86 el fichero no existe, así que no cambia nada.
+	if !strings.Contains(model, " ") {
+		if better := socDesdeDeviceTree(); better != "" {
+			model = better
+		}
+	}
 	return model, len(cores), logical
+}
+
+// socDesdeDeviceTree lee /proc/device-tree/compatible, un fichero del kernel
+// con una lista de pares "vendor,modelo" terminados en NUL, del más específico
+// al más genérico. El último es el del SoC (en una Raspberry Pi 4 es
+// "brcm,bcm2711"; en el R1 solo hay "mediatek,MT6765"). Devuelve "" si el
+// fichero no está o no parsea.
+func socDesdeDeviceTree() string {
+	b, err := os.ReadFile("/proc/device-tree/compatible")
+	if err != nil {
+		return ""
+	}
+	var ultimo string
+	for _, s := range strings.Split(string(b), "\x00") {
+		if s = strings.TrimSpace(s); s != "" {
+			ultimo = s
+		}
+	}
+	vendor, modelo, ok := strings.Cut(ultimo, ",")
+	if !ok || vendor == "" || modelo == "" {
+		return ""
+	}
+	// "mediatek" → "Mediatek": una sola mayúscula al frente para que empareje
+	// visualmente con "Apple" o "AMD" del cpuinfo.
+	v := strings.ToUpper(vendor[:1]) + vendor[1:]
+	return v + " " + modelo
 }
 
 func meminfoKB(key string) int64 {
