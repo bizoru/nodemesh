@@ -209,7 +209,7 @@ func TestTresSondeosMalosSeguidosSiDenuncian(t *testing.T) {
 		t.Fatalf("con dos todavia no, solto %v", dichos)
 	}
 	revisarCanal("telegram", bache, t0+600, decir)
-	if len(dichos) != 1 || !strings.Contains(dichos[0], "3 sondeos seguidos") {
+	if len(dichos) != 1 || !strings.Contains(dichos[0], "3 sondeos malos") {
 		t.Fatalf("al tercero deberia denunciarlo diciendo cuantos van, dijo %v", dichos)
 	}
 
@@ -217,6 +217,39 @@ func TestTresSondeosMalosSeguidosSiDenuncian(t *testing.T) {
 	revisarCanal("telegram", Salud{OK: true}, t0+900, decir)
 	if len(dichos) != 2 || !strings.Contains(dichos[1], "✅") {
 		t.Fatalf("la recuperacion se avisa, dijo %v", dichos)
+	}
+}
+
+// Una averia intermitente (sondeos malos con algun bueno aislado por en
+// medio) tiene que denunciarse. Fue el bug del 2026-10: gcp-east con IPv4
+// colgado y Telegram IPv6 inestable fallaba la mayoria de los sondeos pero
+// acertaba uno de cuando en cuando; el reset a 0 al primer OK dejaba el
+// contador oscilando entre 1 y 2 durante dias sin denunciar. Con decremento,
+// mas malos que buenos acaban llegando al umbral.
+func TestAveriaIntermitenteAcabaDenunciandose(t *testing.T) {
+	state.Canales = map[string]*EstadoCanal{}
+	cfg.RealertHours = 8
+	cfg.CanalesFallosSeguidos = 0
+	var dichos []string
+	decir := func(s string) { dichos = append(dichos, s) }
+	t0 := time.Now().Unix()
+
+	bache := Salud{Motivo: "no se alcanza la API: context deadline exceeded"}
+	// Patron 2 malos : 1 bueno, repetido. El contador tiene que subir.
+	paso := int64(300)
+	n := int64(0)
+	for ; n < 15 && len(dichos) == 0; n++ {
+		s := bache
+		if n%3 == 2 {
+			s = Salud{OK: true}
+		}
+		revisarCanal("telegram", s, t0+n*paso, decir)
+	}
+	if len(dichos) == 0 {
+		t.Fatalf("una averia 2:1 malo:bueno tiene que acabar denunciandose, no lo hizo en %d sondeos", n)
+	}
+	if !strings.Contains(dichos[0], "sondeos malos") {
+		t.Fatalf("el aviso tiene que decir cuantos sondeos malos van, dijo %v", dichos)
 	}
 }
 

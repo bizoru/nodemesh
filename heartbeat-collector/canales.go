@@ -16,14 +16,36 @@ package main
 // inventarse un tercer canal.
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"strings"
 	"time"
 )
+
+// clienteTelegram es el *http.Client para hablar con api.telegram.org desde
+// gcp-east. Fuerza tcp6: gcp-east no tiene IPv4 pública (la interfaz es
+// 10.10.0.2, NAT de GCP sin salida), un SYN por tcp4 se come 10 s de SYN sin
+// respuesta y deja al cliente de 15 s sin presupuesto para completar el
+// handshake IPv6. Con tcp6 directo la respuesta llega en ~0,3 s. Si este
+// colector se mueve algún día a un nodo sin IPv6 habrá que relajarlo.
+func clienteTelegram() *http.Client {
+	dialer := &net.Dialer{Timeout: 5 * time.Second}
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+				return dialer.DialContext(ctx, "tcp6", addr)
+			},
+			TLSHandshakeTimeout:   5 * time.Second,
+			ResponseHeaderTimeout: 10 * time.Second,
+		},
+	}
+}
 
 // EstadoCanal es lo que se sabe de un canal de salida y desde cuando.
 type EstadoCanal struct {
@@ -77,7 +99,7 @@ func saludTelegram() Salud {
 	if cfg.TelegramChat == "" {
 		return Salud{Motivo: "no hay chat configurado (telegramChat vacio)", Firme: true}
 	}
-	cl := &http.Client{Timeout: 15 * time.Second}
+	cl := clienteTelegram()
 	r, err := cl.Get("https://api.telegram.org/bot" + cfg.TelegramToken + "/getMe")
 	if err != nil {
 		// Un timeout o un DNS que no resuelve es un bache hasta que se repita.
@@ -176,12 +198,26 @@ func revisarCanal(nombre string, s Salud, ahora int64, avisarPor func(string)) {
 	}
 	realert := int64(cfg.RealertHours) * 3600
 	if s.OK {
-		est.Fallos = 0
+		// Decremento, no reset a 0: un canal que falla la mayoría de los
+		// sondeos pero acierta uno de cuando en cuando no es "está bien" ni
+		// "fue un bache aislado" — es una avería intermitente. Con reset a 0
+		// (como estaba), el 2026-10 llevó una semana oscilando entre 1/3 y
+		// 2/3 sin denunciar nunca: cada sondeo OK aislado borraba la cuenta.
+		// Con decremento, para denunciar hacen falta más malos que buenos
+		// (mayoría relativa), que es justo lo que caracteriza una avería real.
+		if est.Fallos > 0 {
+			est.Fallos--
+		}
 		if !est.OK {
 			mins := (ahora - est.Desde) / 60
 			avisarPor(fmt.Sprintf("✅ canal %s: vuelve a funcionar (estuvo %d min sin poder avisar).", nombre, mins))
 			est.OK, est.Desde, est.Motivo, est.UltimoAviso = true, ahora, "", 0
 		}
+		// Limpiar el motivo tambien cuando el canal estaba OK con un motivo
+		// colgado (fallos acumulados que nunca llegaron a denunciar). Sin
+		// esto, /status muestra "ok:true" junto a un mensaje de error viejo,
+		// que lee como contradiccion.
+		est.Motivo = ""
 		return
 	}
 	est.Fallos++
@@ -198,7 +234,7 @@ func revisarCanal(nombre string, s Salud, ahora int64, avisarPor func(string)) {
 		est.UltimoAviso = ahora
 		aguante := ""
 		if !s.Firme {
-			aguante = fmt.Sprintf(" (%d sondeos seguidos)", est.Fallos)
+			aguante = fmt.Sprintf(" (%d sondeos malos acumulados)", est.Fallos)
 		}
 		avisarPor(fmt.Sprintf("🔴 canal %s NO puede avisar%s: %s. Las alertas que salgan por ahi se estan perdiendo.", nombre, aguante, s.Motivo))
 		return
@@ -246,11 +282,13 @@ func vigilarCanales() {
 	}
 }
 
-// fallosSeguidosParaAvisar: cuantos sondeos malos seguidos hacen falta para
-// dar un canal por roto cuando el fallo no es firme. Con el sondeo de 5 min
-// por defecto, tres son un cuarto de hora sin poder avisar — lo bastante corto
-// para enterarse de una averia de verdad y lo bastante largo para que los
-// baches de IPv6 de gcp-east no se oigan.
+// fallosSeguidosParaAvisar: a cuanto tiene que subir el contador de fallos
+// para dar un canal por roto cuando el fallo no es firme. El nombre dice
+// "seguidos" por historia: desde el 2026-10 el OK decrementa en vez de
+// resetear, así que no es "N malos consecutivos" sino "al menos N más malos
+// que buenos en el pasado reciente", que es lo que distingue un bache de una
+// avería intermitente. Con el sondeo de 5 min por defecto, 3 son al menos
+// un cuarto de hora de problemas antes de ponerse a dar voces.
 func fallosSeguidosParaAvisar() int {
 	if cfg.CanalesFallosSeguidos > 0 {
 		return cfg.CanalesFallosSeguidos

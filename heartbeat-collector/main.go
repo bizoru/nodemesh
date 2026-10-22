@@ -226,7 +226,7 @@ func telegram(text string) {
 	form := url.Values{}
 	form.Set("chat_id", cfg.TelegramChat)
 	form.Set("text", text)
-	cl := &http.Client{Timeout: 15 * time.Second}
+	cl := clienteTelegram()
 	r, err := cl.PostForm("https://api.telegram.org/bot"+cfg.TelegramToken+"/sendMessage", form)
 	if err != nil {
 		// sinToken y no "%v" a secas: el error de http trae la URL, y la URL
