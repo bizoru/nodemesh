@@ -641,17 +641,18 @@ func getPeerPlacement(node string) *PlacementInfo {
 // de siempre para no romper a quien ya lo consume (SimacotaViewer en el R1 y
 // meshflow leen `location`, no este objeto).
 //
-//	fijo             -> "Bucaramanga"
-//	móvil ubicado    -> "Móvil · Socorro"
-//	móvil estimado   -> "Móvil · Socorro?"
-//	móvil sin ubicar -> "Móvil" (y el homebase entre paréntesis si lo hay)
+//	fijo                   -> "Bucaramanga"
+//	móvil ubicado          -> "Móvil · Socorro"
+//	móvil estimado         -> "Móvil · Socorro?"
+//	móvil solo con homebase-> "Móvil · Bucaramanga?" (misma forma: también es incertidumbre)
+//	móvil sin ubicar       -> "Móvil"
 func etiquetaSitio(p PlacementInfo) string {
 	if p.Class != ClassMobile {
 		return p.Site
 	}
 	if p.Source == SourceHomebase || p.Site == "" {
 		if p.Homebase != "" {
-			return "Móvil (" + p.Homebase + ")"
+			return "Móvil · " + p.Homebase + "?"
 		}
 		return "Móvil"
 	}

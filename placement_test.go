@@ -123,8 +123,9 @@ func TestSinNingunaSeñalNoSeAfirmaElHomebase(t *testing.T) {
 	if got.Estimado() {
 		t.Fatal("el homebase NO es una estimación: es el valor por defecto")
 	}
-	// La etiqueta no puede afirmar que está ahí.
-	if et := etiquetaSitio(got); et != "Móvil (Bucaramanga)" {
+	// La etiqueta no puede afirmar que está ahí: lleva el "?" como cualquier
+	// otra estimación.
+	if et := etiquetaSitio(got); et != "Móvil · Bucaramanga?" {
 		t.Fatalf("la etiqueta no debe afirmar el sitio: %q", et)
 	}
 }
