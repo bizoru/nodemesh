@@ -96,21 +96,49 @@ func infoConEgress(region, ip string, checkedAtOffset time.Duration) nodeInfo {
 	return n
 }
 
-func TestAggregateEgressDeduplicaPorRegion(t *testing.T) {
-	// Dos nodos en 'co' detrás del MISMO ISP (misma IP pública) + uno en 'us'.
-	// El whitelist no quiere la IP repetida, pero sí quiere que la de 'us'
-	// aparezca aparte.
+func TestAggregateEgressDeduplicaPorSitio(t *testing.T) {
+	// Dos nodos en el MISMO sitio detrás del MISMO ISP (misma IP pública) +
+	// uno en otra región. El whitelist no quiere la IP repetida, pero sí
+	// quiere que la de 'us' aparezca aparte.
 	infos := map[string]nodeInfo{
-		"mini":     infoConEgress("co", "190.1.2.3", 0),
-		"x1-nano":  infoConEgress("co", "190.1.2.3", 0),
-		"entry":    infoConEgress("us", "138.68.1.1", 0),
+		"mini":    infoConEgress("co", "190.1.2.3", 0),
+		"x1-nano": infoConEgress("co", "190.1.2.3", 0),
+		"entry":   infoConEgress("us", "138.68.1.1", 0),
 	}
 	out := aggregateEgress(infos)
-	if len(out.Regions["co"]) != 1 || out.Regions["co"][0] != "190.1.2.3" {
-		t.Fatalf("co debería tener una sola IP (190.1.2.3), salió: %v", out.Regions["co"])
+	// infoConEgress pone Site == region para los tests que no distinguen sedes.
+	if ips := out.Regions["co"]["co"]; len(ips) != 1 || ips[0] != "190.1.2.3" {
+		t.Fatalf("co/co debería tener una sola IP (190.1.2.3), salió: %v", ips)
 	}
-	if len(out.Regions["us"]) != 1 || out.Regions["us"][0] != "138.68.1.1" {
-		t.Fatalf("us debería tener 138.68.1.1, salió: %v", out.Regions["us"])
+	if ips := out.Regions["us"]["us"]; len(ips) != 1 || ips[0] != "138.68.1.1" {
+		t.Fatalf("us/us debería tener 138.68.1.1, salió: %v", ips)
+	}
+}
+
+func TestAggregateEgressSeparaDosSedesEnLaMismaRegion(t *testing.T) {
+	// El caso real: Bucaramanga sale por un ISP y Socorro por otro — las dos
+	// son 'co' pero no comparten IP pública. El whitelist tiene que ver
+	// Bucaramanga aparte de Socorro.
+	infos := map[string]nodeInfo{
+		"mini": {
+			State:     stateOnline,
+			Placement: &PlacementInfo{Region: "co", Site: "Bucaramanga"},
+			Egress:    &Egress{IPv4: "181.55.23.9", CheckedAt: time.Now().Unix()},
+		},
+		"athena": {
+			State:     stateOnline,
+			Placement: &PlacementInfo{Region: "co", Site: "Socorro"},
+			Egress:    &Egress{IPv4: "45.172.223.65", CheckedAt: time.Now().Unix()},
+		},
+	}
+	out := aggregateEgress(infos)
+	buc := out.Regions["co"]["Bucaramanga"]
+	soc := out.Regions["co"]["Socorro"]
+	if len(buc) != 1 || buc[0] != "181.55.23.9" {
+		t.Fatalf("Bucaramanga debería tener 181.55.23.9, salió: %v", buc)
+	}
+	if len(soc) != 1 || soc[0] != "45.172.223.65" {
+		t.Fatalf("Socorro debería tener 45.172.223.65, salió: %v", soc)
 	}
 }
 
@@ -139,9 +167,9 @@ func TestAggregateEgressIgnoraNodosOfflineOIsolated(t *testing.T) {
 	n.State = stateOffline
 	infos["muerto"] = n
 	out := aggregateEgress(infos)
-	ips := out.Regions["co"]
+	ips := out.Regions["co"]["co"]
 	if len(ips) != 1 || ips[0] != "190.1.2.3" {
-		t.Fatalf("co debería listar solo la del nodo vivo: %v", ips)
+		t.Fatalf("co/co debería listar solo la del nodo vivo: %v", ips)
 	}
 }
 
@@ -156,8 +184,8 @@ func TestAggregateEgressSinPlacementCaeEnUnknown(t *testing.T) {
 		},
 	}
 	out := aggregateEgress(infos)
-	if len(out.Regions["unknown"]) != 1 || out.Regions["unknown"][0] != "203.0.113.5" {
-		t.Fatalf("un nodo sin placement debería colgar de 'unknown': %v", out.Regions)
+	if ips := out.Regions["unknown"]["unknown"]; len(ips) != 1 || ips[0] != "203.0.113.5" {
+		t.Fatalf("un nodo sin placement debería colgar de 'unknown/unknown': %v", out.Regions)
 	}
 }
 
@@ -168,7 +196,7 @@ func TestAggregateEgressOrdenaIPsParaSalidaEstable(t *testing.T) {
 		"c": infoConEgress("co", "190.2.2.2", 0),
 	}
 	out := aggregateEgress(infos)
-	ips := out.Regions["co"]
+	ips := out.Regions["co"]["co"]
 	if len(ips) != 3 || ips[0] != "190.1.1.1" || ips[1] != "190.2.2.2" || ips[2] != "190.3.3.3" {
 		t.Fatalf("IPs deberían salir ordenadas lexicográficamente, salió: %v", ips)
 	}

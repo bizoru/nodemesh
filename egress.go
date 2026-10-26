@@ -321,15 +321,20 @@ func egressLoop() {
 
 // ---------- agregación por región ----------
 
-// EgressByRegion es lo que consume el whitelist externo: IPs únicas por región,
-// con el detalle crudo de cada nodo aparte para diagnóstico.
+// EgressByRegion es lo que consume el whitelist externo: IPs únicas por
+// región Y sitio (p.ej. Colombia agrupa Bucaramanga y Socorro, con sus IPs
+// aparte). El detalle crudo de cada nodo va en Per, para diagnóstico.
 type EgressByRegion struct {
-	Regions map[string][]string `json:"regions"` // region -> IPv4s únicas, ordenadas
-	Per     map[string]Egress   `json:"per"`     // nodo -> egress (puede estar vacío)
+	Regions map[string]map[string][]string `json:"regions"` // region -> site -> IPv4s únicas, ordenadas
+	Per     map[string]Egress              `json:"per"`     // nodo -> egress
 }
 
-// aggregateEgress junta los egress de /api/nodes por región del placement.
-// Se calcula al servir, no se almacena — igual que capacityOf.
+// aggregateEgress junta los egress de /api/nodes por región Y sitio del
+// placement. Se calcula al servir, no se almacena — igual que capacityOf.
+//
+// El sitio aparece debajo de la región porque un mismo país puede tener
+// varias sedes con ISPs distintos (Bucaramanga sale por un ISP, Socorro por
+// otros dos), y un whitelist necesita saber a cuál sede pertenece cada IP.
 //
 // Excluye nodos offline/isolated y nodos con egress rancio (más viejo que
 // egressTTL): un dato así es peor que no tenerlo, porque un whitelist no
@@ -338,10 +343,10 @@ func aggregateEgress(infos map[string]nodeInfo) EgressByRegion {
 	const egressTTL = int64(2 * 60 * 60) // 2h: cubre varias rondas de 15 min
 	now := time.Now().Unix()
 	out := EgressByRegion{
-		Regions: map[string][]string{},
+		Regions: map[string]map[string][]string{},
 		Per:     map[string]Egress{},
 	}
-	bucket := map[string]map[string]bool{} // region -> set de IPs
+	bucket := map[string]map[string]map[string]bool{} // region -> site -> set de IPs
 	for name, info := range infos {
 		if info.Egress == nil || info.Egress.IPv4 == "" {
 			continue
@@ -352,25 +357,34 @@ func aggregateEgress(infos map[string]nodeInfo) EgressByRegion {
 		if info.State == stateOffline || info.State == stateIsolated {
 			continue
 		}
-		region := ""
-		if info.Placement != nil && info.Placement.Region != "" {
-			region = info.Placement.Region
-		} else {
-			region = "unknown"
+		region, site := "unknown", "unknown"
+		if info.Placement != nil {
+			if info.Placement.Region != "" {
+				region = info.Placement.Region
+			}
+			if info.Placement.Site != "" {
+				site = info.Placement.Site
+			}
 		}
 		if bucket[region] == nil {
-			bucket[region] = map[string]bool{}
+			bucket[region] = map[string]map[string]bool{}
 		}
-		bucket[region][info.Egress.IPv4] = true
+		if bucket[region][site] == nil {
+			bucket[region][site] = map[string]bool{}
+		}
+		bucket[region][site][info.Egress.IPv4] = true
 		out.Per[name] = *info.Egress
 	}
-	for region, ips := range bucket {
-		list := make([]string, 0, len(ips))
-		for ip := range ips {
-			list = append(list, ip)
+	for region, sites := range bucket {
+		out.Regions[region] = map[string][]string{}
+		for site, ips := range sites {
+			list := make([]string, 0, len(ips))
+			for ip := range ips {
+				list = append(list, ip)
+			}
+			sort.Strings(list)
+			out.Regions[region][site] = list
 		}
-		sort.Strings(list)
-		out.Regions[region] = list
 	}
 	return out
 }
