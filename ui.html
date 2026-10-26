@@ -182,9 +182,10 @@ function specsBlock(n) {
   </div>`;
 }
 
-// renderEgress: public IPs grouped by region, for feeding external firewalls /
-// whitelists. If no node has reported yet, the whole block hides itself —
-// an empty table would be noise, not information.
+// renderEgress: public IPs grouped by region AND site, for feeding external
+// firewalls / whitelists. One country can host more than one site (co ->
+// Bucaramanga, Socorro) with different ISPs; collapsing by region alone
+// hides that. If no node has reported yet, the block hides itself.
 async function renderEgress() {
   const r = await fetch("/api/egress/by-region").then(r=>r.json());
   const el = document.getElementById("egress");
@@ -192,9 +193,16 @@ async function renderEgress() {
   const perNames = Object.keys(r.per || {}).sort();
   if (!regions.length && !perNames.length) { el.hidden = true; return; }
   el.hidden = false;
-  const regionRows = regions.map(reg =>
-    `<tr><td>${reg}</td><td>${(r.regions[reg] || []).map(ip => `<code>${ip}</code>`).join(" · ") || "—"}</td></tr>`
-  ).join("");
+  const regionRows = regions.flatMap(reg => {
+    const sites = Object.keys(r.regions[reg] || {}).sort();
+    return sites.map((site, i) => {
+      const ips = (r.regions[reg][site] || []).map(ip => `<code>${ip}</code>`).join(" · ") || "—";
+      const regionCell = i === 0
+        ? `<td rowspan="${sites.length}">${reg}</td>`
+        : "";
+      return `<tr>${regionCell}<td>${site}</td><td>${ips}</td></tr>`;
+    });
+  }).join("");
   const perRows = perNames.map(name => {
     const e = r.per[name];
     const age = e.checkedAt ? Math.round((Date.now()/1000 - e.checkedAt)/60) : null;
@@ -203,10 +211,10 @@ async function renderEgress() {
       <td class="muted">${age !== null ? (age < 1 ? "&lt;1 min ago" : age + " min ago") : "—"}</td></tr>`;
   }).join("");
   el.innerHTML = `
-    <h3>egress — public IPs per region, for external firewall whitelists</h3>
+    <h3>egress — public IPs per region and site, for external firewall whitelists</h3>
     <div class="tablewrap"><table>
-      <tr><th>region</th><th>public IPv4</th></tr>
-      ${regionRows || `<tr><td colspan="2" class="muted">no node has reported yet</td></tr>`}
+      <tr><th>region</th><th>site</th><th>public IPv4</th></tr>
+      ${regionRows || `<tr><td colspan="3" class="muted">no node has reported yet</td></tr>`}
     </table></div>
     <details><summary>per-node detail (${perNames.length})</summary>
       <div class="tablewrap"><table>
