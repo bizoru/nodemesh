@@ -915,6 +915,8 @@ type nodeInfo struct {
 	LANCheck     *LANCheck     `json:"lanCheck,omitempty"`     // only set by whichever node actually checked
 	BLECheck     *BLECheck     `json:"bleCheck,omitempty"`     // only set by whichever node actually checked
 	Specs        *Specs        `json:"specs,omitempty"`        // propios o aprendidos por gossip (ver specs.go)
+	// Egress: IP pública de salida. Relayable, lleva CollectedAt. Ver egress.go.
+	Egress *Egress `json:"egress,omitempty"`
 	// Placement: sitio ya resuelto y de dónde salió el dato. Se relaya como
 	// los specs (lleva UpdatedAt). Ver placement.go.
 	Placement *PlacementInfo `json:"placement,omitempty"`
@@ -1011,6 +1013,7 @@ func gossipOnce(cfg *Config, store *Store, client *http.Client) {
 			// que un nodo conozca la flota entera aunque no llegue a todos.
 			if n != cfg.Node {
 				setPeerSpecs(n, info.Specs)
+				setPeerEgress(n, info.Egress)
 				setPeerPlacement(n, info.Placement)
 				// Mismo trato para las observaciones directas, y por el mismo
 				// motivo: llevan timestamp, así que la copia rancia se
@@ -1112,10 +1115,15 @@ func nodeInfos(cfg *Config, store *Store) map[string]nodeInfo {
 			info.Specs = &s
 			info.Placement = placementPropio()
 			info.Gateway = gatewayActual()
+			if e := getLocalEgress(); e.CollectedAt != 0 {
+				ec := e
+				info.Egress = &ec
+			}
 		} else {
 			info.Version = getPeerVersion(n)
 			info.Specs = getPeerSpecs(n)
 			info.Placement = getPeerPlacement(n)
+			info.Egress = getPeerEgress(n)
 		}
 		// `location` se sigue rellenando: el visor del R1 y meshflow leen ese
 		// campo, no el objeto nuevo. Sale del placement cuando lo hay y del
@@ -1167,6 +1175,12 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 	mux.HandleFunc("/api/specs", specsHandler)
 	mux.HandleFunc("/api/capacity", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, capacityOf(nodeInfos(cfg, store)))
+	})
+	mux.HandleFunc("/api/egress", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, getLocalEgress())
+	})
+	mux.HandleFunc("/api/egress/by-region", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, aggregateEgress(nodeInfos(cfg, store)))
 	})
 	mux.HandleFunc("/api/log/", func(w http.ResponseWriter, r *http.Request) {
 		node := strings.TrimPrefix(r.URL.Path, "/api/log/")
@@ -1260,6 +1274,21 @@ func newMux(cfg *Config, store *Store) *http.ServeMux {
 				}
 				fmt.Fprintf(w, "# HELP %s %s\n# TYPE %s gauge\n%s%s %g\n", m.name, m.help, m.name, m.name, nlbl, m.val)
 			}
+		}
+		// Egress IPv4 propio. Solo el local — igual que los specs — para que
+		// Prometheus no vea la misma serie repetida en cada scrape.
+		if e := getLocalEgress(); e.IPv4 != "" {
+			fmt.Fprintf(w, "# HELP nodemesh_egress_ipv4 1 cuando el nodo conoce su IPv4 de salida; etiqueta ip la lleva\n")
+			fmt.Fprintf(w, "# TYPE nodemesh_egress_ipv4 gauge\n")
+			region := ""
+			if p := placementPropio(); p != nil {
+				region = p.Region
+			}
+			fmt.Fprintf(w, "nodemesh_egress_ipv4{node=%q,region=%q,ip=%q,source=%q} 1\n",
+				cfg.Node, region, e.IPv4, e.Source)
+			fmt.Fprintf(w, "# HELP nodemesh_egress_last_check_timestamp_seconds unix ts del último chequeo (exitoso o no)\n")
+			fmt.Fprintf(w, "# TYPE nodemesh_egress_last_check_timestamp_seconds gauge\n")
+			fmt.Fprintf(w, "nodemesh_egress_last_check_timestamp_seconds{node=%q} %d\n", cfg.Node, e.CheckedAt)
 		}
 		bleState.mu.RLock()
 		c := bleState.check
@@ -1379,6 +1408,13 @@ func main() {
 			})
 			head, ok := store.Head(cfg.Node)
 			if !ok || !sameStatus(head, r) || r.TS-head.TS >= heartbeat {
+				// La red cambió (SSID, IP local, o estado de tailnet): empuja
+				// un chequeo inmediato de la IP pública en vez de esperar al
+				// siguiente tick de 15 min. Un portátil que se mueve de sede
+				// aparece con la IP nueva en la próxima ronda de gossip.
+				if ok && !sameStatus(head, r) {
+					pokeEgress()
+				}
 				r.Seq = 1
 				if ok {
 					r.Seq = head.Seq + 1
@@ -1411,6 +1447,10 @@ func main() {
 	// IP pública propia (solo si PublicIPURL está puesto): es lo que ubica a
 	// los nodos a los que el sistema les esconde el SSID y la tabla ARP.
 	go ipPublicaLoop(cfg)
+	// Egress: IP pública de salida reportada por STUN (fallback HTTP), para
+	// alimentar whitelists externos. Corre siempre, sin configurar nada.
+	// Ver egress.go.
+	go egressLoop()
 
 	mux := newMux(cfg, store)
 	go serveOn("127.0.0.1:"+fmt.Sprint(cfg.Port), mux)

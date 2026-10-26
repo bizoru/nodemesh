@@ -58,6 +58,15 @@
   .cap .n { font-size:19px; font-variant-numeric:tabular-nums; }
   .cap .l { font-size:12px; color:var(--muted); display:block; }
   .cap .warn { color:var(--stale); font-size:12px; }
+  /* egress: public IPs grouped by region. Meant to be read by a human copying
+     into a firewall whitelist, so it stays compact and the IPs are monospaced. */
+  .eg { background:var(--card); border:1px solid var(--line); border-radius:10px;
+        padding:14px 16px; margin-bottom:18px; }
+  .eg h3 { font-size:13px; color:var(--muted); font-weight:500; margin-bottom:8px; }
+  .eg code { font: 13px/1.4 ui-monospace, Menlo, Consolas, monospace; }
+  .eg details { margin-top:10px; }
+  .eg details summary { color:var(--muted); cursor:pointer; font-size:12px; }
+  .eg td.muted, .eg th { color:var(--muted); font-size:12px; }
 </style>
 </head>
 <body>
@@ -65,6 +74,7 @@
 <div class="sub" id="self">…</div>
 <div class="cap" id="cap" hidden></div>
 <div class="sites" id="sites"></div>
+<div class="eg" id="egress" hidden></div>
 <div class="grid" id="grid"></div>
 <div id="history"></div>
 <script>
@@ -172,6 +182,40 @@ function specsBlock(n) {
   </div>`;
 }
 
+// renderEgress: public IPs grouped by region, for feeding external firewalls /
+// whitelists. If no node has reported yet, the whole block hides itself —
+// an empty table would be noise, not information.
+async function renderEgress() {
+  const r = await fetch("/api/egress/by-region").then(r=>r.json());
+  const el = document.getElementById("egress");
+  const regions = Object.keys(r.regions || {}).sort();
+  const perNames = Object.keys(r.per || {}).sort();
+  if (!regions.length && !perNames.length) { el.hidden = true; return; }
+  el.hidden = false;
+  const regionRows = regions.map(reg =>
+    `<tr><td>${reg}</td><td>${(r.regions[reg] || []).map(ip => `<code>${ip}</code>`).join(" · ") || "—"}</td></tr>`
+  ).join("");
+  const perRows = perNames.map(name => {
+    const e = r.per[name];
+    const age = e.checkedAt ? Math.round((Date.now()/1000 - e.checkedAt)/60) : null;
+    return `<tr><td>${name}</td><td><code>${e.ipv4 || "—"}</code></td>
+      <td class="muted">${e.source || "—"}</td>
+      <td class="muted">${age !== null ? (age < 1 ? "&lt;1 min ago" : age + " min ago") : "—"}</td></tr>`;
+  }).join("");
+  el.innerHTML = `
+    <h3>egress — public IPs per region, for external firewall whitelists</h3>
+    <div class="tablewrap"><table>
+      <tr><th>region</th><th>public IPv4</th></tr>
+      ${regionRows || `<tr><td colspan="2" class="muted">no node has reported yet</td></tr>`}
+    </table></div>
+    <details><summary>per-node detail (${perNames.length})</summary>
+      <div class="tablewrap"><table>
+        <tr><th>node</th><th>IPv4</th><th>source</th><th>checked</th></tr>
+        ${perRows}
+      </table></div>
+    </details>`;
+}
+
 async function renderCapacity() {
   const c = await fetch("/api/capacity").then(r=>r.json());
   const el = document.getElementById("cap");
@@ -222,6 +266,7 @@ async function refresh() {
   });
   if (current) showHistory(current, true);
   renderCapacity();
+  renderEgress();
 }
 
 async function showHistory(name, quiet) {
