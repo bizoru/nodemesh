@@ -165,8 +165,14 @@ func saludNotify() Salud {
 	if len(rotas) > 0 {
 		motivo += " (" + strings.Join(rotas, ", ") + ")"
 	}
-	// Contesto y dijo que esta mal: eso es una averia, no un bache.
-	return Salud{Motivo: motivo, Firme: true}
+	// Antes se asumia que "contesto y dijo que esta mal" era averia firme.
+	// Desde la histeresis de /v1/health (notify, 2026-10-31) el servicio
+	// marca degraded tras 30s sin broker, pero los baches reales de
+	// reconexion MQTT pueden durar 70-80s (back-off de paho tras un relogin
+	// rechazado por nats-auth). Un solo sondeo que caiga en esa ventana no
+	// es averia: entra por la misma puerta que los baches de Telegram y se
+	// confirma con fallosSeguidosParaAvisar sondeos.
+	return Salud{Motivo: motivo}
 }
 
 // urlSaludNotify deriva /v1/health de la URL de envio, para no tener que
