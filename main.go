@@ -482,29 +482,16 @@ func netStatus() (string, string) {
 			// permission; wdutil reports it truthfully when running as root.
 			ssid := ""
 			if os.Geteuid() == 0 {
-				for _, line := range strings.Split(run("wdutil", "info"), "\n") {
-					if i := strings.Index(line, "SSID"); i >= 0 && strings.Contains(line, ":") {
-						v := strings.TrimSpace(line[strings.Index(line, ":")+1:])
-						if v != "" && !strings.EqualFold(v, "none") {
-							ssid = v
-						}
-						break
-					}
-				}
+				ssid = parseSSIDFromWdutil(run("wdutil", "info"))
 			}
 			if ssid == "" {
-				if m := ssidRe.FindStringSubmatch(run("ipconfig", "getsummary", iface)); m != nil {
-					ssid = strings.TrimSpace(m[1])
-				}
+				ssid = parseSSIDFromIpconfigSummary(run("ipconfig", "getsummary", iface))
 			}
 			if ssid == "" {
 				out := run("networksetup", "-getairportnetwork", iface)
 				if i := strings.Index(out, ": "); i >= 0 {
 					ssid = strings.TrimSpace(out[i+2:])
 				}
-			}
-			if strings.Contains(ssid, "redacted") { // literal "<redacted>" placeholder
-				ssid = ""
 			}
 			return "wifi", ssid
 		}
@@ -518,14 +505,7 @@ func netStatus() (string, string) {
 			return "unknown", ""
 		}
 		if _, err := os.Stat("/sys/class/net/" + iface + "/wireless"); err == nil {
-			ssid := ""
-			out := run("iw", "dev", iface, "link")
-			for _, line := range strings.Split(out, "\n") {
-				if i := strings.Index(line, "SSID: "); i >= 0 {
-					ssid = strings.TrimSpace(line[i+6:])
-				}
-			}
-			return "wifi", ssid
+			return "wifi", parseSSIDFromIwLink(run("iw", "dev", iface, "link"))
 		}
 		return "ethernet", ""
 	case "windows":
