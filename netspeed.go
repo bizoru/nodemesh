@@ -33,16 +33,18 @@ import (
 // cada minuto — meterlos en Record la convertiría en una serie temporal sin
 // tope (ver el comentario de cabecera de Specs).
 type NetLink struct {
-	Iface      string  `json:"iface,omitempty"`
-	LinkMbps   int     `json:"linkMbps,omitempty"`   // 0 = el sistema no lo publica
-	LinkSource string  `json:"linkSource,omitempty"` // de dónde salió LinkMbps
-	RSSI       int     `json:"rssi,omitempty"`       // dBm, sólo wifi
-	RxKbps     float64 `json:"rxKbps,omitempty"`
-	TxKbps     float64 `json:"txKbps,omitempty"`
-	RxPeakKbps float64 `json:"rxPeakKbps,omitempty"`
-	TxPeakKbps float64 `json:"txPeakKbps,omitempty"`
-	WindowSec  int     `json:"windowSec,omitempty"` // ventana sobre la que se promedió
-	PeakSince  int64   `json:"peakSince,omitempty"` // unix; los picos se reinician con el proceso
+	Iface       string  `json:"iface,omitempty"`
+	LinkMbps    int     `json:"linkMbps,omitempty"`   // 0 = el sistema no lo publica
+	LinkSource  string  `json:"linkSource,omitempty"` // de dónde salió LinkMbps
+	RSSI        int     `json:"rssi,omitempty"`       // dBm, sólo wifi
+	RxKbps      float64 `json:"rxKbps,omitempty"`
+	TxKbps      float64 `json:"txKbps,omitempty"`
+	RxPeakKbps  float64 `json:"rxPeakKbps,omitempty"`
+	TxPeakKbps  float64 `json:"txPeakKbps,omitempty"`
+	WindowSec   int     `json:"windowSec,omitempty"` // ventana sobre la que se promedió
+	PeakSince   int64   `json:"peakSince,omitempty"` // unix; los picos se reinician con el proceso
+	GatewayMAC  string  `json:"gatewayMAC,omitempty"`  // lowercase colon form, "" if unknown
+	LocalSubnet string  `json:"localSubnet,omitempty"` // CIDR, "" if unknown
 }
 
 // netMaxWindow: ventana máxima que se acepta para calcular una tasa. Si entre
@@ -123,5 +125,7 @@ func localNetLink() *NetLink {
 	// historia acumulada, no dependen de que la ventana de ahora sirviera.
 	n.RxPeakKbps, n.TxPeakKbps = netSamples.peakRx, netSamples.peakTx
 	n.PeakSince = netSamples.since
+	n.GatewayMAC = collectGatewayMAC()
+	n.LocalSubnet = collectLocalSubnet()
 	return &n
 }
